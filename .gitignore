@@ -30,3 +30,33 @@ go.work.sum
 # Editor/IDE
 # .idea/
 # .vscode/
+
+# Binaries
+sieve
+sieve.exe
+gcg
+gcg.exe
+
+# SQLite database files
+*.db
+*.db-wal
+*.db-shm
+
+# Default data directories
+.sieve/
+
+# Wasm parsers (binary, large)
+parsers/*.wasm
+
+# Embedded model assets (downloaded separately)
+internal/embedding/assets/model.onnx
+internal/embedding/assets/vocab.txt
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+
+.codex

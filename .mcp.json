@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "sieve": {
+      "command": "./sieve",
+      "args": [],
+      "env": {
+        "SIEVE_DB_PATH": "${workspaceFolder}/.sieve/db/sieve.db"
+      }
+    }
+  }
+}
