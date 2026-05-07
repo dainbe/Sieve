@@ -1,4 +1,4 @@
-// Package context implements GCG's core context-building logic.
+// Package context implements Sieve's core context-building logic.
 package context
 
 import (
@@ -34,19 +34,21 @@ type ContextNode struct {
 // Branch describes an explorable subtree visible from the current result.
 // Corresponds to Corpus2Skill's "bird's-eye view" of adjacent corpus regions.
 type Branch struct {
-	Path        string `json:"path"`         // directory or package prefix
+	Path        string `json:"path"`
 	FileCount   int    `json:"file_count"`
 	SymbolCount int    `json:"symbol_count"`
-	Hint        string `json:"hint"`          // one-line description of what's here
+	Summary     string `json:"summary"` // what this directory contains (PageIndex-style node description)
+	Hint        string `json:"hint"`    // uncovered file count
 }
 
 // Result is what ctx_build_context returns to the AI.
 type Result struct {
-	// Stage 1: always present — summaries + branches
 	Nodes         []ContextNode `json:"nodes"`
-	Branches      []Branch      `json:"branches"`       // explorable adjacent subtrees
+	Branches      []Branch      `json:"branches"` // explorable adjacent subtrees (drill down here if context is insufficient)
 	TokenEstimate int           `json:"token_estimate"`
 	Truncated     bool          `json:"truncated"`
+	Insufficient  bool          `json:"insufficient,omitempty"`   // true when context may be incomplete; consider ctx_drill_down
+	SuggestedNext []string      `json:"suggested_next,omitempty"` // branch paths most likely to contain relevant context
 	Message       string        `json:"message,omitempty"`
 }
 
@@ -172,11 +174,22 @@ func (b *Builder) Build(query string) (Result, error) {
 	}
 	branches := b.computeBranches(includedIDs)
 
+	// Derive suggested_next: top-2 uncovered branches by file count
+	var suggestedNext []string
+	for i, br := range branches {
+		if i >= 2 {
+			break
+		}
+		suggestedNext = append(suggestedNext, br.Path)
+	}
+
 	return Result{
 		Nodes:         nodes,
 		Branches:      branches,
 		TokenEstimate: used,
 		Truncated:     anySkipped,
+		Insufficient:  anySkipped || len(branches) > 0,
+		SuggestedNext: suggestedNext,
 	}, nil
 }
 
@@ -229,13 +242,30 @@ func (b *Builder) DrillDown(path string) (Result, error) {
 		}, nil
 	}
 
+	// Re-compute branches from drill-down scope for continued navigation
+	includedIDs := make(map[string]bool, len(nodes))
+	for _, n := range nodes {
+		includedIDs[n.ID] = true
+	}
+	branches := b.computeBranches(includedIDs)
+
+	var suggestedNext []string
+	for i, br := range branches {
+		if i >= 2 {
+			break
+		}
+		suggestedNext = append(suggestedNext, br.Path)
+	}
+
 	return Result{
 		Nodes:         nodes,
+		Branches:      branches,
 		TokenEstimate: used,
 		Truncated:     anySkipped,
+		Insufficient:  anySkipped || len(branches) > 0,
+		SuggestedNext: suggestedNext,
 	}, nil
 }
-
 
 func typeBoost(nodeType string) float64 {
 	switch nodeType {
@@ -254,6 +284,11 @@ func compress(n store.Node) string {
 	switch n.Type {
 	case "function", "type", "variable":
 		if n.Content != "" {
+			// Ensure we don't return too much for a single symbol
+			lines := strings.Split(n.Content, "\n")
+			if len(lines) > 15 {
+				return strings.Join(lines[:15], "\n") + "\n... (signature truncated)"
+			}
 			return n.Content
 		}
 		return n.ID

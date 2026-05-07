@@ -5,11 +5,11 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/mark3labs/mcp-go/mcp"
-	"github.com/mark3labs/mcp-go/server"
 	"github.com/dainbe/Sieve/internal/indexer"
 	"github.com/dainbe/Sieve/internal/store"
 	"github.com/dainbe/Sieve/internal/tools"
+	"github.com/mark3labs/mcp-go/mcp"
+	"github.com/mark3labs/mcp-go/server"
 )
 
 const version = "0.1.0"
@@ -24,8 +24,16 @@ func main() {
 		Level: logLevel,
 	})))
 
-	// --- Store (auto-create parent directory) ---
-	dbPath := envOr("SIEVE_DB_PATH", "./db/sieve.db")
+	// --- Allowed root (required) ---
+	allowedRoot := os.Getenv("SIEVE_ALLOWED_ROOT")
+	if allowedRoot == "" {
+		slog.Error("SIEVE_ALLOWED_ROOT is required; set it to the project root directory")
+		os.Exit(1)
+	}
+
+	// --- Store: DB is always placed inside the project root ---
+	// {SIEVE_ALLOWED_ROOT}/.sieve/sieve.db
+	dbPath := filepath.Join(allowedRoot, ".sieve", "sieve.db")
 	if err := os.MkdirAll(filepath.Dir(dbPath), 0755); err != nil {
 		slog.Error("create db directory failed", "err", err)
 		os.Exit(1)
@@ -35,9 +43,6 @@ func main() {
 		slog.Error("store init failed", "err", err)
 		os.Exit(1)
 	}
-
-	// --- Allowed root for path traversal protection ---
-	allowedRoot := os.Getenv("SIEVE_ALLOWED_ROOT")
 
 	// --- Parser manager (optional) ---
 	var pm *indexer.ParserManager
@@ -49,7 +54,7 @@ func main() {
 	}
 
 	// --- MCP server ---
-	s := server.NewMCPServer("sieve", version, server.WithToolCapabilities(false))
+	s := server.NewMCPServer("sieve", version)
 	h := tools.NewHandler(db, pm, allowedRoot, version)
 
 	s.AddTool(mcp.NewTool("ctx_build_context",
@@ -58,8 +63,8 @@ func main() {
 	), h.BuildContext)
 
 	s.AddTool(mcp.NewTool("ctx_index_project",
-		mcp.WithDescription("Scan a project directory and build the knowledge graph. Only changed files are re-processed."),
-		mcp.WithString("path", mcp.Required(), mcp.Description("Absolute path to the project root.")),
+		mcp.WithDescription("Scan a project directory and build the knowledge graph. If path is omitted, SIEVE_ALLOWED_ROOT is used. Only changed files are re-processed. Only call this once at session start or when files change."),
+		mcp.WithString("path", mcp.Description("Absolute path to the project root. Defaults to SIEVE_ALLOWED_ROOT. Must be within the allowed root directory.")),
 	), h.IndexProject)
 
 	s.AddTool(mcp.NewTool("ctx_drill_down",
@@ -80,8 +85,8 @@ func main() {
 	), h.TraceRelation)
 
 	s.AddTool(mcp.NewTool("ctx_quick_exec",
-		mcp.WithDescription("Execute a Wasm binary in a sandbox and return summarized stdout."),
-		mcp.WithString("wasm_b64", mcp.Required(), mcp.Description("Base64-encoded Wasm binary.")),
+		mcp.WithDescription("Execute a Wasm binary in a sandbox and return summarized stdout. Only call this tool when explicitly provided with a compiled Wasm binary. Do NOT use for images, screenshots, or any non-Wasm input."),
+		mcp.WithString("wasm_b64", mcp.Required(), mcp.Description("Base64-encoded compiled Wasm binary (.wasm file). Must be a valid Wasm binary, not an image or other file type.")),
 		mcp.WithString("stdin", mcp.Description("Optional stdin payload.")),
 	), h.QuickExec)
 
@@ -89,7 +94,15 @@ func main() {
 		mcp.WithDescription("Return server status: version, uptime, node/edge counts, memory."),
 	), h.Status)
 
-	slog.Info("GCG MCP server starting", "version", version, "db", dbPath)
+	s.AddTool(mcp.NewTool("ctx_reset_index",
+		mcp.WithDescription("Completely clear the knowledge graph and FTS index. This cannot be undone."),
+	), h.ResetIndex)
+
+	s.AddTool(mcp.NewTool("ctx_restart_server",
+		mcp.WithDescription("Gracefully shut down the server. Most MCP clients will automatically restart the process."),
+	), h.RestartServer)
+
+	slog.Info("Sieve MCP server starting", "version", version, "db", dbPath, "allowed_root", allowedRoot)
 	if err := server.ServeStdio(s); err != nil {
 		slog.Error("server error", "err", err)
 		os.Exit(1)
@@ -100,11 +113,4 @@ func main() {
 	if pm != nil {
 		_ = pm.Close()
 	}
-}
-
-func envOr(key, def string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	return def
 }

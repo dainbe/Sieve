@@ -47,6 +47,13 @@ func (pm *ParserManager) Close() error {
 	return pm.runtime.Close(pm.ctx)
 }
 
+// ClearCache clears the compiled module cache.
+func (pm *ParserManager) ClearCache() {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+	pm.modules = make(map[string]wazero.CompiledModule)
+}
+
 // Parse runs the Wasm parser for lang against code and returns a JSON string.
 // Returns an error if no parser Wasm file exists for lang.
 //

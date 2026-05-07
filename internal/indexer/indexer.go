@@ -37,6 +37,7 @@ func IndexProject(ctx context.Context, s *store.Store, pm *ParserManager, allowe
 			return 0, fmt.Errorf("path %q is outside allowed root %q", absRoot, absAllowed)
 		}
 	}
+	absAllowed, _ := filepath.Abs(allowedRoot)
 
 	existing, _ := s.GetAllFileNodeIDs()
 	seen := make(map[string]bool)
@@ -44,7 +45,8 @@ func IndexProject(ctx context.Context, s *store.Store, pm *ParserManager, allowe
 
 	err = filepath.WalkDir(absRoot, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
-			return nil
+			slog.Error("indexer: error walking path", "path", path, "err", err)
+			return err
 		}
 		if d.IsDir() && shouldSkipDir(d.Name()) {
 			return filepath.SkipDir
@@ -85,7 +87,7 @@ func IndexProject(ctx context.Context, s *store.Store, pm *ParserManager, allowe
 		}
 
 		content := string(data)
-		ext := filepath.Ext(path)
+		ext := strings.ToLower(filepath.Ext(path))
 
 		if err := s.UpsertNode(relPath, extToType(ext), content, hash); err != nil {
 			return fmt.Errorf("upsert node %s: %w", relPath, err)
@@ -106,21 +108,51 @@ func IndexProject(ctx context.Context, s *store.Store, pm *ParserManager, allowe
 				_ = s.UpsertEdge(relPath, symID, "contains")
 			}
 		default:
-			if pm != nil {
-				lang := extToLang(ext)
-				if lang != "" {
-					jsonStr, err := pm.Parse(ctx, lang, content)
-					if err == nil {
-						var syms []Symbol
-						if err := json.Unmarshal([]byte(jsonStr), &syms); err == nil {
-							for _, sym := range syms {
-								symID := fmt.Sprintf("%s:%s", relPath, sym.Name)
-								_ = s.UpsertNode(symID, sym.Type, sym.Content, "")
-								_ = s.UpsertEdge(relPath, symID, "contains")
-							}
-						}
-					}
+			lang := extToLang(ext)
+			if lang == "" {
+				break
+			}
+			if pm == nil {
+				// Fallback: heuristic extraction (no Wasm parser configured)
+				for _, sym := range extractSymbolsHeuristic(ext, content) {
+					symID := fmt.Sprintf("%s:%s", relPath, sym.Name)
+					_ = s.UpsertNode(symID, sym.Type, sym.Content, "")
+					_ = s.UpsertEdge(relPath, symID, "contains")
 				}
+				break
+			}
+
+			jsonStr, err := pm.Parse(ctx, lang, content)
+			if err != nil {
+				slog.Warn("indexer: parser failed; skipping symbol extraction",
+					"path", relPath,
+					"lang", lang,
+					"err", err,
+				)
+				break
+			}
+
+			var syms []Symbol
+			if err := json.Unmarshal([]byte(jsonStr), &syms); err != nil {
+				slog.Warn("indexer: parser returned invalid symbols JSON; skipping symbol extraction",
+					"path", relPath,
+					"lang", lang,
+					"err", err,
+				)
+				break
+			}
+
+			for _, sym := range syms {
+				symID := fmt.Sprintf("%s:%s", relPath, sym.Name)
+				_ = s.UpsertNode(symID, sym.Type, sym.Content, "")
+				_ = s.UpsertEdge(relPath, symID, "contains")
+			}
+			if len(syms) > 0 {
+				slog.Debug("indexer: parser symbols extracted",
+					"path", relPath,
+					"lang", lang,
+					"symbols", len(syms),
+				)
 			}
 		}
 
@@ -129,9 +161,13 @@ func IndexProject(ctx context.Context, s *store.Store, pm *ParserManager, allowe
 		return nil
 	})
 
-	// Cleanup stale nodes (files deleted since last index)
+	// Cleanup stale nodes (only those within the current scan root)
+	relScanRoot, _ := filepath.Rel(absAllowed, absRoot)
 	for _, id := range existing {
-		if !seen[id] {
+		// If the node is under the directory we just scanned but wasn't seen
+		isUnderScanRoot := relScanRoot == "." || strings.HasPrefix(id, relScanRoot+string(filepath.Separator))
+
+		if isUnderScanRoot && !seen[id] {
 			if err := s.DeleteNode(id); err == nil {
 				slog.Info("indexer: deleted stale node", "path", id)
 			}
@@ -155,15 +191,16 @@ func shouldSkipDir(name string) bool {
 }
 
 func isSupportedFile(path string) bool {
-	exts := map[string]bool{
+	ext := strings.ToLower(filepath.Ext(path))
+	supported := map[string]bool{
 		".go": true, ".ts": true, ".tsx": true, ".js": true, ".jsx": true,
 		".py": true, ".rs": true, ".md": true, ".txt": true,
 	}
-	return exts[filepath.Ext(path)]
+	return supported[ext]
 }
 
 func extToType(ext string) string {
-	switch ext {
+	switch strings.ToLower(ext) {
 	case ".go":
 		return "go_file"
 	case ".ts", ".tsx":
@@ -205,23 +242,31 @@ func extractImports(content, ext string) []string {
 			}
 		case ".py":
 			if strings.HasPrefix(line, "import ") {
-				imports = append(imports, strings.TrimPrefix(line, "import "))
+				// Support "import os, sys"
+				mods := strings.Split(strings.TrimPrefix(line, "import "), ",")
+				for _, m := range mods {
+					imports = append(imports, strings.TrimSpace(m))
+				}
 			} else if strings.HasPrefix(line, "from ") {
 				if parts := strings.Fields(line); len(parts) >= 2 {
-					imports = append(imports, parts[1])
+					// Handle "from .module import func" or "from module import ..."
+					mod := parts[1]
+					imports = append(imports, mod)
 				}
 			}
 		case ".ts", ".tsx", ".js", ".jsx":
-			if strings.Contains(line, "from '") || strings.Contains(line, `from "`) {
-				q := byte('\'')
-				if strings.Contains(line, `from "`) {
-					q = '"'
-				}
-				start := strings.LastIndexByte(line, q)
-				if start > 0 {
-					sub := line[start+1:]
-					if end := strings.IndexByte(sub, q); end >= 0 {
-						imports = append(imports, sub[:end])
+			// Handle both 'import ... from "mod"' and 'import "mod"' or 'require("mod")'
+			line = strings.ReplaceAll(line, "`", "\"")
+			line = strings.ReplaceAll(line, "'", "\"")
+
+			if strings.Contains(line, "import") || strings.Contains(line, "require(") {
+				parts := strings.Split(line, "\"")
+				// In 'import { x } from "mod"', the path is usually in the second to last part
+				// In 'require("mod")', it's in the second part.
+				for i := 1; i < len(parts); i += 2 {
+					m := strings.TrimSpace(parts[i])
+					if m != "" && m != "from" && !strings.Contains(m, " ") {
+						imports = append(imports, m)
 					}
 				}
 			}

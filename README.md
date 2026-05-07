@@ -1,4 +1,4 @@
-# GCG — Graph-Context-Go
+# Sieve — Graph-Context-Go
 
 AIコーディングエージェントのコンテキストウィンドウを最適化する、超軽量・ローカル完結型 MCP サーバー。
 
@@ -32,14 +32,16 @@ go build -o sieve .
 ./sieve
 
 # 環境変数
-SIEVE_DB_PATH=./db/sieve.db   # DB パス（デフォルト: ./sieve.db）
-SIEVE_DEBUG=1            # デバッグログ有効
-SIEVE_PARSERS_DIR=./parsers  # Wasm パーサーディレクトリ
+SIEVE_ALLOWED_ROOT=/path/to/project    # プロジェクトルート（必須）。DBは {ALLOWED_ROOT}/.sieve/sieve.db に自動作成される
+SIEVE_DEBUG=1                          # デバッグログ有効
+SIEVE_PARSERS_DIR=./parsers            # Wasm パーサーディレクトリ
 ```
 
 ---
 
 ## MCPクライアント連携
+
+Sieve は **MCP サーバー 1 インスタンス = 1 プロジェクト = 1 DB** として運用します。DB は `SIEVE_ALLOWED_ROOT/.sieve/sieve.db` に自動作成されるため、プロジェクトごとに `SIEVE_ALLOWED_ROOT` を設定するだけで分離されます。
 
 ### Claude Code
 
@@ -51,7 +53,7 @@ SIEVE_PARSERS_DIR=./parsers  # Wasm パーサーディレクトリ
     "sieve": {
       "command": "/path/to/sieve",
       "env": {
-        "SIEVE_DB_PATH": "${workspaceFolder}/.sieve/db/sieve.db"
+        "SIEVE_ALLOWED_ROOT": "${workspaceFolder}"
       }
     }
   }
@@ -73,7 +75,9 @@ AIが明示的にツールを呼ばなくても、ファイル編集前に自動
   "mcpServers": {
     "sieve": {
       "command": "/path/to/sieve",
-      "env": { "SIEVE_DB_PATH": "${workspaceFolder}/.sieve/db/sieve.db" }
+      "env": {
+        "SIEVE_ALLOWED_ROOT": "${workspaceFolder}"
+      }
     }
   },
   "hooks": {
@@ -106,7 +110,7 @@ command = "/path/to/sieve"
 args = []
 
 [mcp_servers.sieve.env]
-SIEVE_DB_PATH = ".sieve/db/sieve.db"
+SIEVE_ALLOWED_ROOT = "/path/to/project"
 ```
 
 CLIで追加する場合：
@@ -134,7 +138,7 @@ stdio 形式の MCP サーバーとして登録します。Cursor の場合は `
       "command": "/path/to/sieve",
       "args": [],
       "env": {
-        "SIEVE_DB_PATH": ".sieve/db/sieve.db"
+        "SIEVE_ALLOWED_ROOT": "/path/to/project"
       }
     }
   }
@@ -153,6 +157,8 @@ stdio 形式の MCP サーバーとして登録します。Cursor の場合は `
 | `ctx_hybrid_search` | FTS5 キーワード検索 |
 | `ctx_trace_relation` | シンボルの依存グラフを BFS トレース |
 | `ctx_quick_exec` | Wasm サンドボックスでコード実行 |
+| `ctx_reset_index` | インデックスを完全にクリア（全ノード・エッジの削除） |
+| `ctx_restart_server` | サーバーを安全に終了（クライアントによる自動再起動を期待） |
 | `ctx_status` | バージョン・uptime・ノード数・メモリ使用量 |
 
 ### 典型的な使い方
@@ -169,13 +175,36 @@ ctx_build_context: { "query": "認証処理の実装を変更したい" }
 
 ---
 
+## Wasm パルサーの自作
+
+Sieve は `SIEVE_PARSERS_DIR` 内にある `{language}.wasm` を自動的にロードします。
+独自のパルサーを作成する場合、以下の WebAssembly ABI を実装する必要があります：
+
+- `malloc(size: uint32) -> uint32`: メモリ確保
+- `free(ptr: uint32)`: メモリ解放
+- `parse(ptr: uint32, len: uint32) -> uint32`: 
+    - 引数: 解析対象のソースコードのポインタと長さ
+    - 戻り値: シンボル情報の JSON 文字列（null 終端）へのポインタ
+
+JSON は以下の形式の配列を期待します：
+```json
+[
+  {
+    "Name": "SymbolName",
+    "Type": "function",
+    "Line": 10,
+    "Content": "func SymbolName() ..."
+  }
+]
+```
+
 ## アーキテクチャ
 
 ```
 AIエージェント（Claude Code / Codex / Cursor ...）
         │  MCP (stdio)
         ▼
-   GCG MCP サーバー
+   Sieve MCP サーバー
         │
    ┌────┴────────────────┐
    │  ctx_build_context  │  ← コア機能

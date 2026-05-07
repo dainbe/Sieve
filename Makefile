@@ -1,4 +1,4 @@
-BINARY  := gcg
+BINARY  := Sieve
 MODULE  := github.com/dainbe/Sieve
 
 .PHONY: all build test clean

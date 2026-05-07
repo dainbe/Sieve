@@ -12,11 +12,12 @@ import (
 // Store wraps SQLite (FTS5 + knowledge graph).
 // All public methods are safe for concurrent use.
 // An RWMutex is used: reads are concurrent, writes are exclusive.
-// IndexProject should acquire the write lock for the full duration to prevent
-// half-indexed state from being observed by concurrent Build calls.
+// Public methods acquire their own locks; callers should not hold Mu while
+// calling back into Store methods.
 type Store struct {
-	Mu sync.RWMutex // exported so handler can coordinate index vs build
-	db *sql.DB
+	Mu   sync.RWMutex // exported so handler can coordinate index vs build
+	db   *sql.DB
+	path string
 }
 
 const schema = `
@@ -69,7 +70,11 @@ func New(path string) (*Store, error) {
 	if _, err := db.Exec(schema); err != nil {
 		return nil, fmt.Errorf("apply schema: %w", err)
 	}
-	return &Store{db: db}, nil
+	return &Store{db: db, path: path}, nil
+}
+
+func (s *Store) Path() string {
+	return s.path
 }
 
 func (s *Store) Close() error {
@@ -192,6 +197,19 @@ func (s *Store) GetNode(id string) (Node, error) {
 		`SELECT id, type, content FROM nodes WHERE id = ?`, id,
 	).Scan(&n.ID, &n.Type, &n.Content)
 	return n, err
+}
+
+func (s *Store) Reset() error {
+	s.Mu.Lock()
+	defer s.Mu.Unlock()
+	if _, err := s.db.Exec(`DELETE FROM edges`); err != nil {
+		return err
+	}
+	if _, err := s.db.Exec(`DELETE FROM nodes`); err != nil {
+		return err
+	}
+	_, err := s.db.Exec(`VACUUM`)
+	return err
 }
 
 func (s *Store) TraceEdges(startID string, maxDepth int) ([]Edge, error) {

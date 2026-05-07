@@ -34,8 +34,8 @@ go.work.sum
 # Binaries
 sieve
 sieve.exe
-gcg
-gcg.exe
+Sieve
+Sieve.exe
 
 # SQLite database files
 *.db
@@ -60,3 +60,5 @@ Thumbs.db
 *.swp
 
 .codex
+.continue
+tmp

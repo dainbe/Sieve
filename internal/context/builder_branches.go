@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"sort"
+	"strings"
 )
 
 // initBranches replaces the placeholder in builder.go.
@@ -17,6 +18,7 @@ func (b *Builder) computeBranches(includedIDs map[string]bool) []Branch {
 	type dirStat struct {
 		total   int
 		covered int
+		files   []string // sampled file IDs for summary generation
 	}
 	dirs := map[string]*dirStat{}
 
@@ -29,6 +31,9 @@ func (b *Builder) computeBranches(includedIDs map[string]bool) []Branch {
 			dirs[dir] = &dirStat{}
 		}
 		dirs[dir].total++
+		if len(dirs[dir].files) < 5 {
+			dirs[dir].files = append(dirs[dir].files, id)
+		}
 		if includedIDs[id] {
 			dirs[dir].covered++
 		}
@@ -41,9 +46,11 @@ func (b *Builder) computeBranches(includedIDs map[string]bool) []Branch {
 			continue // fully covered — no need to drill down
 		}
 		hint := fmt.Sprintf("%d file(s) not yet in context", uncovered)
+		summary := dirSummary(dir, stat.files)
 		branches = append(branches, Branch{
 			Path:      dir,
 			FileCount: stat.total,
+			Summary:   summary,
 			Hint:      hint,
 		})
 	}
@@ -55,4 +62,24 @@ func (b *Builder) computeBranches(includedIDs map[string]bool) []Branch {
 		branches = branches[:8]
 	}
 	return branches
+}
+
+// dirSummary generates a one-line description of a directory from its file names.
+// This mirrors PageIndex's node description: what lives here, at a glance.
+func dirSummary(dir string, files []string) string {
+	if len(files) == 0 {
+		return dir
+	}
+	// Collect base names without extension
+	names := make([]string, 0, len(files))
+	for _, f := range files {
+		base := filepath.Base(f)
+		ext := filepath.Ext(base)
+		names = append(names, strings.TrimSuffix(base, ext))
+	}
+	joined := strings.Join(names, ", ")
+	if len(files) < 5 {
+		return joined
+	}
+	return joined + ", …"
 }
