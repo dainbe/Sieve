@@ -90,17 +90,18 @@ func main() {
 		mcp.WithString("stdin", mcp.Description("Optional stdin payload.")),
 	), h.QuickExec)
 
-	s.AddTool(mcp.NewTool("ctx_status",
-		mcp.WithDescription("Return server status: version, uptime, node/edge counts, memory."),
-	), h.Status)
-
 	s.AddTool(mcp.NewTool("ctx_reset_index",
-		mcp.WithDescription("Completely clear the knowledge graph and FTS index. This cannot be undone."),
+		mcp.WithDescription("Wipe the index and re-index from scratch. Use when the index is stale or corrupted. This is slow — only use when ctx_index_project is insufficient."),
+		mcp.WithString("path", mcp.Description("Absolute path to the project root. Defaults to SIEVE_ALLOWED_ROOT.")),
 	), h.ResetIndex)
 
 	s.AddTool(mcp.NewTool("ctx_restart_server",
-		mcp.WithDescription("Gracefully shut down the server. Most MCP clients will automatically restart the process."),
+		mcp.WithDescription("Restart the Sieve server process. Use when the server is unresponsive or after major configuration changes. The MCP host will restart the process automatically."),
 	), h.RestartServer)
+
+	s.AddTool(mcp.NewTool("ctx_status",
+		mcp.WithDescription("Return server status: version, uptime, node/edge counts, memory."),
+	), h.Status)
 
 	slog.Info("Sieve MCP server starting", "version", version, "db", dbPath, "allowed_root", allowedRoot)
 	if err := server.ServeStdio(s); err != nil {

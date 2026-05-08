@@ -37,8 +37,10 @@ func IndexProject(ctx context.Context, s *store.Store, pm *ParserManager, allowe
 			return 0, fmt.Errorf("path %q is outside allowed root %q", absRoot, absAllowed)
 		}
 	}
-	absAllowed, _ := filepath.Abs(allowedRoot)
-
+	absAllowed := absRoot
+	if allowedRoot != "" {
+		absAllowed, _ = filepath.Abs(allowedRoot)
+	}
 	existing, _ := s.GetAllFileNodeIDs()
 	seen := make(map[string]bool)
 	var updated int

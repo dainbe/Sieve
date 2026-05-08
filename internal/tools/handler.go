@@ -66,32 +66,6 @@ func (h *Handler) BuildContext(ctx context.Context, req mcp.CallToolRequest) (*m
 	return mcp.NewToolResultText(string(out)), nil
 }
 
-// --- ctx_reset_index ---
-
-func (h *Handler) ResetIndex(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	if err := h.store.Reset(); err != nil {
-		slog.Error("reset_index: failed", "err", err)
-		return mcp.NewToolResultError(fmt.Sprintf("reset failed: %v", err)), nil
-	}
-	if h.pm != nil {
-		h.pm.ClearCache()
-	}
-	slog.Info("reset_index: successful")
-	return mcp.NewToolResultText("Index has been completely reset. You should run ctx_index_project again to rebuild the graph."), nil
-}
-
-// --- ctx_restart_server ---
-
-func (h *Handler) RestartServer(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	slog.Warn("restart_server: server will shut down in 500ms")
-	go func() {
-		time.Sleep(500 * time.Millisecond)
-		slog.Info("restart_server: exiting process")
-		os.Exit(0)
-	}()
-	return mcp.NewToolResultText("Server is shutting down for restart. Your MCP client (e.g., Claude Code, Cursor) should restart the process automatically."), nil
-}
-
 // --- ctx_index_project ---
 
 func (h *Handler) IndexProject(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -110,14 +84,48 @@ func (h *Handler) IndexProject(ctx context.Context, req mcp.CallToolRequest) (*m
 		return mcp.NewToolResultError(fmt.Sprintf("indexing failed: %v", err)), nil
 	}
 
-	// Get total counts after indexing to show consistent status
-	nodes, edges, _ := h.store.Stats()
+	slog.Info("index_project: done", "path", path, "updated", count)
+	return mcp.NewToolResultText(fmt.Sprintf("Indexed %d files (changed) from %s", count, path)), nil
+}
 
-	slog.Info("index_project: done", "path", path, "updated_files", count, "total_nodes", nodes)
-	return mcp.NewToolResultText(fmt.Sprintf(
-		"Indexed %d changed files from %s.\nProject Status: %d total nodes, %d edges in knowledge graph.",
-		count, path, nodes, edges,
-	)), nil
+// --- ctx_reset_index ---
+
+func (h *Handler) ResetIndex(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	path, ok := req.Params.Arguments["path"].(string)
+	if !ok || path == "" {
+		path = h.allowedRoot
+	}
+	if path == "" {
+		return mcp.NewToolResultError("path is required when SIEVE_ALLOWED_ROOT is not set"), nil
+	}
+
+	slog.Info("reset_index: clearing store")
+	if err := h.store.Reset(); err != nil {
+		slog.Error("reset_index: reset failed", "err", err)
+		return mcp.NewToolResultError(fmt.Sprintf("reset failed: %v", err)), nil
+	}
+
+	slog.Info("reset_index: re-indexing", "path", path)
+	count, err := indexer.IndexProject(ctx, h.store, h.pm, h.allowedRoot, path)
+	if err != nil {
+		slog.Error("reset_index: indexing failed", "path", path, "err", err)
+		return mcp.NewToolResultError(fmt.Sprintf("indexing failed: %v", err)), nil
+	}
+
+	slog.Info("reset_index: done", "path", path, "indexed", count)
+	return h.buildStatusResult()
+}
+
+// --- ctx_restart_server ---
+
+func (h *Handler) RestartServer(_ context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	slog.Info("restart_server: exiting process for host-managed restart")
+	// Exit cleanly; the MCP host (Claude Code / Cursor / Codex) is responsible for restarting the process.
+	go func() {
+		_ = h.store.Close()
+		os.Exit(0)
+	}()
+	return mcp.NewToolResultText("Sieve is restarting. Wait a moment then retry your request."), nil
 }
 
 // --- ctx_hybrid_search ---
@@ -210,7 +218,7 @@ type statusResponse struct {
 	AllowedRoot  string  `json:"allowed_root"`
 }
 
-func (h *Handler) Status(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (h *Handler) buildStatusResult() (*mcp.CallToolResult, error) {
 	nodes, edges, err := h.store.Stats()
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("stats failed: %v", err)), nil
@@ -233,6 +241,10 @@ func (h *Handler) Status(ctx context.Context, req mcp.CallToolRequest) (*mcp.Cal
 
 	out, _ := json.MarshalIndent(resp, "", "  ")
 	return mcp.NewToolResultText(string(out)), nil
+}
+
+func (h *Handler) Status(_ context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	return h.buildStatusResult()
 }
 
 func argInt(v interface{}, defaultVal int) int {

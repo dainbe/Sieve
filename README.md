@@ -1,4 +1,4 @@
-# Sieve — Graph-Context-Go
+# Sieve
 
 AIコーディングエージェントのコンテキストウィンドウを最適化する、超軽量・ローカル完結型 MCP サーバー。
 
@@ -149,54 +149,37 @@ stdio 形式の MCP サーバーとして登録します。Cursor の場合は `
 
 ## MCP ツール
 
-| ツール | 説明 |
-|---|---|
-| `ctx_build_context` | **メインツール。** クエリに対して関連コンテキストを自律的に収集・圧縮して返す |
-| `ctx_index_project` | プロジェクトをスキャン（差分のみ再インデックス） |
-| `ctx_drill_down` | `ctx_build_context` の `branches` で示されたパスの詳細コンテキストを取得（Corpus2Skill の掘り下げ）|
-| `ctx_hybrid_search` | FTS5 キーワード検索 |
-| `ctx_trace_relation` | シンボルの依存グラフを BFS トレース |
-| `ctx_quick_exec` | Wasm サンドボックスでコード実行 |
-| `ctx_reset_index` | インデックスを完全にクリア（全ノード・エッジの削除） |
-| `ctx_restart_server` | サーバーを安全に終了（クライアントによる自動再起動を期待） |
-| `ctx_status` | バージョン・uptime・ノード数・メモリ使用量 |
+| ツール | 説明 | レスポンス |
+|---|---|---|
+| `ctx_build_context` | **メインツール。** クエリに対して関連コンテキストを自律的に収集・圧縮して返す | nodes・branches・suggested_next |
+| `ctx_index_project` | プロジェクトをスキャン（差分のみ再インデックス） | ctx_status 形式 |
+| `ctx_reset_index` | インデックスを全削除して再構築。インデックスが壊れた場合や初回以外のコード大幅変更時に使用 | ctx_status 形式 |
+| `ctx_restart_server` | サーバープロセスを再起動。MCP ホストが自動的に再起動する | メッセージ |
+| `ctx_drill_down` | `ctx_build_context` の `branches` で示されたパスの詳細コンテキストを取得 | nodes・branches・suggested_next |
+| `ctx_hybrid_search` | FTS5 キーワード検索（サマリーのみ） | nodes |
+| `ctx_trace_relation` | シンボルの依存グラフを BFS トレース | edges |
+| `ctx_quick_exec` | Wasm サンドボックスでコード実行 | stdout |
+| `ctx_status` | バージョン・uptime・ノード数・メモリ使用量・DB パス | status |
 
 ### 典型的な使い方
 
 ```
-# まずインデックスを作成
+# まずインデックスを作成（初回・またはファイルが増えたとき）
 ctx_index_project: { "path": "/your/project" }
+
+# インデックスをリセットして再構築（インデックスが壊れたとき）
+ctx_reset_index: { "path": "/your/project" }
 
 # あとは ctx_build_context だけ使えばよい
 ctx_build_context: { "query": "認証処理の実装を変更したい" }
+
+# コンテキストが不十分なら suggested_next を掘り下げる
+ctx_drill_down: { "path": "backend/app/api" }
 ```
 
 `ctx_build_context` は内部で FTS5 検索・グラフトレース・コンテンツ圧縮を自律的に実行し、4000トークン以内に収まる最適なコンテキストを返します。
 
 ---
-
-## Wasm パルサーの自作
-
-Sieve は `SIEVE_PARSERS_DIR` 内にある `{language}.wasm` を自動的にロードします。
-独自のパルサーを作成する場合、以下の WebAssembly ABI を実装する必要があります：
-
-- `malloc(size: uint32) -> uint32`: メモリ確保
-- `free(ptr: uint32)`: メモリ解放
-- `parse(ptr: uint32, len: uint32) -> uint32`: 
-    - 引数: 解析対象のソースコードのポインタと長さ
-    - 戻り値: シンボル情報の JSON 文字列（null 終端）へのポインタ
-
-JSON は以下の形式の配列を期待します：
-```json
-[
-  {
-    "Name": "SymbolName",
-    "Type": "function",
-    "Line": 10,
-    "Content": "func SymbolName() ..."
-  }
-]
-```
 
 ## アーキテクチャ
 
@@ -227,3 +210,6 @@ AIエージェント（Claude Code / Codex / Cursor ...）
 | 3 | ✅ | wazero サンドボックス、Go AST シンボル抽出、Wasm パーサー |
 | 4 | ✅ | インクリメンタルインデックス、FTS サニタイズ、削除同期 |
 | 5 | ✅ | ctx_build_context、コンテキスト自律圧縮、slog 構造化ログ |
+| 6 | ✅ | Python / TypeScript / JavaScript / Rust heuristic シンボル抽出 |
+| 7 | ✅ | PageIndex 思想の取り込み（branches summary・suggested_next・Insufficient フラグ） |
+| 8 | ✅ | ctx_reset_index・ctx_restart_server 追加、DB 自動配置（SIEVE_ALLOWED_ROOT 必須化）|

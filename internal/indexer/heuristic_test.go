@@ -1,6 +1,8 @@
 package indexer
 
 import (
+	"context"
+	"os"
 	"reflect"
 	"testing"
 )
@@ -127,5 +129,158 @@ async fn run() {}
 				t.Errorf("extractRustSymbols() = %v, want %v", got, tt.expected)
 			}
 		})
+	}
+}
+func TestExtractTSSymbols_ReactComponent(t *testing.T) {
+	src := `
+const Button = ({ onClick }: Props) => <button onClick={onClick} />
+
+let handler = async (req: Request) => {}
+`
+	syms := extractTSSymbols(src)
+	byName := map[string]Symbol{}
+	for _, s := range syms {
+		byName[s.Name] = s
+	}
+
+	if _, ok := byName["Button"]; !ok {
+		t.Error("Button not found")
+	}
+	if _, ok := byName["handler"]; !ok {
+		t.Error("handler not found")
+	}
+}
+
+// TestExtractSymbolsHeuristic_Dispatch verifies routing by file extension.
+func TestExtractSymbolsHeuristic_Dispatch(t *testing.T) {
+	cases := []struct {
+		ext      string
+		src      string
+		wantName string // empty = expect zero results
+	}{
+		{".py", "def hello(): pass", "hello"},
+		{".ts", "export function greet() {}", "greet"},
+		{".tsx", "const Btn = () => <button />", "Btn"},
+		{".js", "function init() {}", "init"},
+		{".jsx", "const App = () => null", "App"},
+		{".rs", "pub fn run() {}", "run"},
+		{".rb", "def foo; end", ""}, // unsupported — expect no results
+	}
+	for _, tc := range cases {
+		syms := extractSymbolsHeuristic(tc.ext, tc.src)
+		if tc.wantName == "" {
+			if len(syms) != 0 {
+				t.Errorf("ext %q: expected no symbols, got %v", tc.ext, symbolNames(syms))
+			}
+			continue
+		}
+		found := false
+		for _, s := range syms {
+			if s.Name == tc.wantName {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("ext %q: symbol %q not found in %v", tc.ext, tc.wantName, symbolNames(syms))
+		}
+	}
+}
+
+// TestIndexProject_PythonSymbols verifies Python symbols are indexed via heuristic fallback.
+func TestIndexProject_PythonSymbols(t *testing.T) {
+	tmpDir, s := setupTest(t)
+
+	src := `
+from fastapi import APIRouter
+
+router = APIRouter()
+
+class UserModel:
+    id: int
+    name: str
+
+@router.get("/users")
+async def get_users():
+    return []
+`
+	writeFile(t, tmpDir, "users.py", src)
+
+	if _, err := IndexProject(context.Background(), s, nil, "", tmpDir); err != nil {
+		t.Fatal(err)
+	}
+
+	cases := []struct{ id, wantTyp string }{
+		{"users.py:UserModel", "class"},
+		{"users.py:get_users", "function"},
+	}
+	for _, tc := range cases {
+		n, err := s.GetNode(tc.id)
+		if err != nil {
+			t.Errorf("node %q not found: %v", tc.id, err)
+			continue
+		}
+		if n.Type != tc.wantTyp {
+			t.Errorf("node %q: want type %q, got %q", tc.id, tc.wantTyp, n.Type)
+		}
+	}
+}
+
+// TestIndexProject_TSSymbols verifies TypeScript symbols are indexed via heuristic fallback.
+func TestIndexProject_TSSymbols(t *testing.T) {
+	tmpDir, s := setupTest(t)
+
+	src := `
+import { useState } from "react"
+
+export interface LoginForm {
+  email: string
+  password: string
+}
+
+export const LoginPage: React.FC = () => {
+  const [email, setEmail] = useState("")
+  return null
+}
+
+export async function login(form: LoginForm): Promise<void> {}
+`
+	writeFile(t, tmpDir, "login.ts", src)
+
+	if _, err := IndexProject(context.Background(), s, nil, "", tmpDir); err != nil {
+		t.Fatal(err)
+	}
+
+	cases := []struct{ id, wantTyp string }{
+		{"login.ts:LoginForm", "interface"},
+		{"login.ts:LoginPage", "function"},
+		{"login.ts:login", "function"},
+	}
+	for _, tc := range cases {
+		n, err := s.GetNode(tc.id)
+		if err != nil {
+			t.Errorf("node %q not found: %v", tc.id, err)
+			continue
+		}
+		if n.Type != tc.wantTyp {
+			t.Errorf("node %q: want type %q, got %q", tc.id, tc.wantTyp, n.Type)
+		}
+	}
+}
+
+// helpers
+
+func symbolNames(syms []Symbol) []string {
+	names := make([]string, len(syms))
+	for i, s := range syms {
+		names[i] = s.Name
+	}
+	return names
+}
+
+func writeFile(t *testing.T, dir, name, content string) {
+	t.Helper()
+	if err := os.WriteFile(dir+"/"+name, []byte(content), 0644); err != nil {
+		t.Fatal(err)
 	}
 }
