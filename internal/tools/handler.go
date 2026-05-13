@@ -45,12 +45,7 @@ func (h *Handler) BuildContext(ctx context.Context, req mcp.CallToolRequest) (*m
 		return mcp.NewToolResultError("query is required"), nil
 	}
 
-	// Acquire read lock around context selection so concurrent writes do not
-	// change the graph mid-build.
-	h.store.Mu.RLock()
 	result, err := h.builder.Build(query)
-	h.store.Mu.RUnlock()
-
 	if err != nil {
 		slog.Error("build_context: failed", "err", err)
 		return mcp.NewToolResultError(fmt.Sprintf("build context failed: %v", err)), nil
@@ -120,8 +115,11 @@ func (h *Handler) ResetIndex(ctx context.Context, req mcp.CallToolRequest) (*mcp
 
 func (h *Handler) RestartServer(_ context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	slog.Info("restart_server: exiting process for host-managed restart")
-	// Exit cleanly; the MCP host (Claude Code / Cursor / Codex) is responsible for restarting the process.
+	// Schedule exit after a brief delay so the MCP response is flushed to the
+	// host before the process terminates. The MCP host (Claude Code / Cursor /
+	// Codex) is responsible for restarting the process.
 	go func() {
+		time.Sleep(200 * time.Millisecond)
 		_ = h.store.Close()
 		os.Exit(0)
 	}()
@@ -270,12 +268,7 @@ func (h *Handler) DrillDown(ctx context.Context, req mcp.CallToolRequest) (*mcp.
 	if len(path) > 4096 {
 		return mcp.NewToolResultError("path too long (max 4096 bytes)"), nil
 	}
-	// Acquire read lock around branch expansion so concurrent writes do not
-	// change the graph mid-build.
-	h.store.Mu.RLock()
 	result, err := h.builder.DrillDown(path)
-	h.store.Mu.RUnlock()
-
 	if err != nil {
 		slog.Error("drill_down: failed", "path", path, "err", err)
 		return mcp.NewToolResultError(fmt.Sprintf("drill down failed: %v", err)), nil

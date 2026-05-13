@@ -67,7 +67,6 @@ func IndexProject(ctx context.Context, s *store.Store, pm *ParserManager, allowe
 			return nil
 		}
 		if allowedRoot != "" {
-			absAllowed, _ := filepath.Abs(allowedRoot)
 			if !strings.HasPrefix(realPath+string(filepath.Separator), absAllowed+string(filepath.Separator)) {
 				slog.Warn("indexer: skip path outside allowed root", "path", realPath)
 				return nil

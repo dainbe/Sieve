@@ -182,6 +182,97 @@ var Debug = false
 	}
 }
 
+// TestIndexProject_AllowedRoot verifies that files under allowedRoot are indexed
+// and that symlinks pointing outside allowedRoot are rejected.
+func TestIndexProject_AllowedRoot(t *testing.T) {
+	tmpDir, s := setupTest(t)
+	ctx := context.Background()
+
+	// Create allowed subtree with one file.
+	allowed := filepath.Join(tmpDir, "allowed")
+	if err := os.Mkdir(allowed, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(allowed, "main.go"), []byte("package main\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Index with allowedRoot set — should index the file inside allowed.
+	count, err := IndexProject(ctx, s, nil, allowed, allowed)
+	if err != nil {
+		t.Fatalf("IndexProject failed: %v", err)
+	}
+	if count != 1 {
+		t.Errorf("expected 1 indexed file, got %d", count)
+	}
+}
+
+// TestIndexProject_AllowedRoot_RejectsOutside verifies that a root outside
+// allowedRoot is rejected before any walking occurs.
+func TestIndexProject_AllowedRoot_RejectsOutside(t *testing.T) {
+	tmpDir, s := setupTest(t)
+	ctx := context.Background()
+
+	allowed := filepath.Join(tmpDir, "allowed")
+	outside := filepath.Join(tmpDir, "outside")
+	for _, d := range []string{allowed, outside} {
+		if err := os.Mkdir(d, 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(outside, "secret.go"), []byte("package secret\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// root is outside allowedRoot — must return an error.
+	_, err := IndexProject(ctx, s, nil, allowed, outside)
+	if err == nil {
+		t.Fatal("expected error when root is outside allowedRoot, got nil")
+	}
+}
+
+// TestIndexProject_AllowedRoot_SymlinkEscape verifies that a symlink inside
+// allowedRoot that points outside is silently skipped (not indexed).
+func TestIndexProject_AllowedRoot_SymlinkEscape(t *testing.T) {
+	tmpDir, s := setupTest(t)
+	ctx := context.Background()
+
+	allowed := filepath.Join(tmpDir, "allowed")
+	outside := filepath.Join(tmpDir, "outside")
+	for _, d := range []string{allowed, outside} {
+		if err := os.Mkdir(d, 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// A legitimate file inside allowed.
+	if err := os.WriteFile(filepath.Join(allowed, "ok.go"), []byte("package main\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	// A file outside allowed that a symlink will point to.
+	if err := os.WriteFile(filepath.Join(outside, "secret.go"), []byte("package secret\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	// Symlink inside allowed → outside.
+	if err := os.Symlink(filepath.Join(outside, "secret.go"), filepath.Join(allowed, "escape.go")); err != nil {
+		t.Skip("symlinks not supported on this platform")
+	}
+
+	count, err := IndexProject(ctx, s, nil, allowed, allowed)
+	if err != nil {
+		t.Fatalf("IndexProject failed: %v", err)
+	}
+	// Only ok.go should be indexed; escape.go must be skipped.
+	if count != 1 {
+		t.Errorf("expected 1 indexed file (symlink escape skipped), got %d", count)
+	}
+	ids, _ := s.GetAllFileNodeIDs()
+	for _, id := range ids {
+		if id == "escape.go" {
+			t.Error("escape.go was indexed despite pointing outside allowedRoot")
+		}
+	}
+}
+
 // TestExtractImports_Go verifies Go import extraction.
 func TestExtractImports_Go(t *testing.T) {
 	src := `package main
