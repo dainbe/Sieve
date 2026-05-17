@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"math"
 	"os"
+	"path/filepath"
 	"runtime"
 	"time"
 
@@ -74,6 +75,20 @@ func (h *Handler) IndexProject(ctx context.Context, req mcp.CallToolRequest) (*m
 	if path == "" {
 		return mcp.NewToolResultError("path is required when SIEVE_ALLOWED_ROOT is not set"), nil
 	}
+	// If the client passes a relative path (e.g. ".") and allowedRoot is set,
+	// use allowedRoot directly — filepath.Abs resolves against the process
+	// working directory which may differ from the project root.
+	if !filepath.IsAbs(path) {
+		if h.allowedRoot != "" {
+			path = h.allowedRoot
+		} else {
+			abs, err := filepath.Abs(path)
+			if err != nil {
+				return mcp.NewToolResultError(fmt.Sprintf("cannot resolve path %q: %v", path, err)), nil
+			}
+			path = abs
+		}
+	}
 
 	slog.Info("index_project: start", "path", path)
 	count, err := indexer.IndexProject(ctx, h.store, h.pm, h.allowedRoot, path)
@@ -95,6 +110,17 @@ func (h *Handler) ResetIndex(ctx context.Context, req mcp.CallToolRequest) (*mcp
 	}
 	if path == "" {
 		return mcp.NewToolResultError("path is required when SIEVE_ALLOWED_ROOT is not set"), nil
+	}
+	if !filepath.IsAbs(path) {
+		if h.allowedRoot != "" {
+			path = h.allowedRoot
+		} else {
+			abs, err := filepath.Abs(path)
+			if err != nil {
+				return mcp.NewToolResultError(fmt.Sprintf("cannot resolve path %q: %v", path, err)), nil
+			}
+			path = abs
+		}
 	}
 
 	slog.Info("reset_index: clearing store")
