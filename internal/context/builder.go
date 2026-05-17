@@ -202,9 +202,17 @@ func (b *Builder) DrillDown(path string) (Result, error) {
 		return Result{}, fmt.Errorf("list nodes: %w", err)
 	}
 
-	prefix := strings.TrimSuffix(path, "/") + "/"
-	if !strings.Contains(path, "/") {
-		prefix = path // single file
+	// Determine prefix for matching.
+	// If path exactly matches a node ID it is a single file; otherwise treat it
+	// as a directory prefix. We derive this from the actual node list so that
+	// root-level directories (which contain no "/") are handled correctly.
+	dirPrefix := strings.TrimSuffix(path, "/") + "/"
+	isExactFile := false
+	for _, id := range allIDs {
+		if id == path {
+			isExactFile = true
+			break
+		}
 	}
 
 	var nodes []ContextNode
@@ -212,8 +220,14 @@ func (b *Builder) DrillDown(path string) (Result, error) {
 	anySkipped := false
 
 	for _, id := range allIDs {
-		if id != path && !strings.HasPrefix(id, prefix) {
-			continue
+		if isExactFile {
+			if id != path {
+				continue
+			}
+		} else {
+			if id != path && !strings.HasPrefix(id, dirPrefix) {
+				continue
+			}
 		}
 		n, err := b.store.GetNode(id)
 		if err != nil {

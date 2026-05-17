@@ -64,8 +64,10 @@ func RunWithOptions(ctx context.Context, wasmB64 string, opts RunOptions) (strin
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	// 3. Runtime (compilation cache kept per call for simplicity;
-	//    callers with high throughput should pass a shared wazero.Runtime).
+	// 3. Runtime — created fresh per call because each invocation receives an
+	//    arbitrary Wasm binary that cannot be shared across calls.
+	//    The ParserManager (indexer package) uses a cached runtime for
+	//    repeated calls with the same Wasm; that pattern does not apply here.
 	rCfg := wazero.NewRuntimeConfig().
 		WithMemoryLimitPages(maxMemoryPages).
 		WithCloseOnContextDone(true)

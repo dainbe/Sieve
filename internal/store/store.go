@@ -215,36 +215,39 @@ func (s *Store) Reset() error {
 func (s *Store) TraceEdges(startID string, maxDepth int) ([]Edge, error) {
 	s.Mu.RLock()
 	defer s.Mu.RUnlock()
-	visited := map[string]bool{startID: true}
-	queue := []string{startID}
-	var result []Edge
-	for depth := 0; depth < maxDepth && len(queue) > 0; depth++ {
-		var next []string
-		for _, id := range queue {
-			rows, err := s.db.Query(
-				`SELECT to_id, relation_type FROM edges WHERE from_id = ?`, id,
-			)
-			if err != nil {
-				return nil, err
-			}
-			for rows.Next() {
-				var e Edge
-				e.FromID = id
-				if err := rows.Scan(&e.ToID, &e.Relation); err != nil {
-					rows.Close()
-					return nil, err
-				}
-				result = append(result, e)
-				if !visited[e.ToID] {
-					visited[e.ToID] = true
-					next = append(next, e.ToID)
-				}
-			}
-			rows.Close()
-		}
-		queue = next
+	// Single recursive CTE replaces the per-node BFS loop, eliminating N+1 queries.
+	// SQLite supports recursive CTEs since 3.8.3 (2014).
+	const q = `
+WITH RECURSIVE bfs(from_id, to_id, relation_type, depth) AS (
+  SELECT from_id, to_id, relation_type, 1
+  FROM edges
+  WHERE from_id = ?
+  UNION ALL
+  SELECT e.from_id, e.to_id, e.relation_type, bfs.depth + 1
+  FROM edges e
+  JOIN bfs ON e.from_id = bfs.to_id
+  WHERE bfs.depth < ?
+)
+SELECT from_id, to_id, relation_type FROM bfs`
+	rows, err := s.db.Query(q, startID, maxDepth)
+	if err != nil {
+		return nil, err
 	}
-	return result, nil
+	defer rows.Close()
+	var result []Edge
+	seen := map[[2]string]bool{}
+	for rows.Next() {
+		var e Edge
+		if err := rows.Scan(&e.FromID, &e.ToID, &e.Relation); err != nil {
+			return nil, err
+		}
+		key := [2]string{e.FromID, e.ToID}
+		if !seen[key] {
+			seen[key] = true
+			result = append(result, e)
+		}
+	}
+	return result, rows.Err()
 }
 
 func (s *Store) TraceNodeIDs(startID string, maxDepth int) ([]string, error) {

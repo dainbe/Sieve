@@ -57,8 +57,11 @@ func (h *Handler) BuildContext(ctx context.Context, req mcp.CallToolRequest) (*m
 		"truncated", result.Truncated,
 	)
 
-	out, _ := json.MarshalIndent(result, "", "  ")
-	return mcp.NewToolResultText(string(out)), nil
+	out, err := marshalJSON(result)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	return mcp.NewToolResultText(out), nil
 }
 
 // --- ctx_index_project ---
@@ -157,8 +160,11 @@ func (h *Handler) HybridSearch(ctx context.Context, req mcp.CallToolRequest) (*m
 		})
 	}
 
-	out, _ := json.MarshalIndent(results, "", "  ")
-	return mcp.NewToolResultText(string(out)), nil
+	out, err := marshalJSON(results)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	return mcp.NewToolResultText(out), nil
 }
 
 // --- ctx_trace_relation ---
@@ -178,8 +184,11 @@ func (h *Handler) TraceRelation(ctx context.Context, req mcp.CallToolRequest) (*
 		return mcp.NewToolResultError(fmt.Sprintf("trace failed: %v", err)), nil
 	}
 
-	out, _ := json.MarshalIndent(edges, "", "  ")
-	return mcp.NewToolResultText(string(out)), nil
+	out, err := marshalJSON(edges)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	return mcp.NewToolResultText(out), nil
 }
 
 // --- ctx_quick_exec ---
@@ -237,12 +246,26 @@ func (h *Handler) buildStatusResult() (*mcp.CallToolResult, error) {
 		AllowedRoot:  h.allowedRoot,
 	}
 
-	out, _ := json.MarshalIndent(resp, "", "  ")
-	return mcp.NewToolResultText(string(out)), nil
+	out, err := marshalJSON(resp)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	return mcp.NewToolResultText(out), nil
 }
 
 func (h *Handler) Status(_ context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	return h.buildStatusResult()
+}
+
+// marshalJSON serialises v to indented JSON.
+// Marshalling our own structs should never fail; if it does, a safe fallback
+// error message is returned so the caller can still respond.
+func marshalJSON(v any) (string, error) {
+	out, err := json.MarshalIndent(v, "", "  ")
+	if err != nil {
+		return "", fmt.Errorf("marshal response: %w", err)
+	}
+	return string(out), nil
 }
 
 func argInt(v interface{}, defaultVal int) int {
@@ -280,6 +303,9 @@ func (h *Handler) DrillDown(ctx context.Context, req mcp.CallToolRequest) (*mcp.
 		"tokens", result.TokenEstimate,
 	)
 
-	out, _ := json.MarshalIndent(result, "", "  ")
-	return mcp.NewToolResultText(string(out)), nil
+	out, err := marshalJSON(result)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	return mcp.NewToolResultText(out), nil
 }

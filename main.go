@@ -43,6 +43,7 @@ func main() {
 		slog.Error("store init failed", "err", err)
 		os.Exit(1)
 	}
+	defer func() { _ = db.Close() }()
 
 	// --- Parser manager (optional) ---
 	var pm *indexer.ParserManager
@@ -50,6 +51,8 @@ func main() {
 		pm, err = indexer.NewParserManager(parsersDir)
 		if err != nil {
 			slog.Warn("parser manager init failed", "err", err)
+		} else {
+			defer func() { _ = pm.Close() }()
 		}
 	}
 
@@ -107,11 +110,5 @@ func main() {
 	if err := server.ServeStdio(s); err != nil {
 		slog.Error("server error", "err", err)
 		os.Exit(1)
-	}
-
-	slog.Info("shutdown: closing store")
-	_ = db.Close()
-	if pm != nil {
-		_ = pm.Close()
 	}
 }

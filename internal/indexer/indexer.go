@@ -6,6 +6,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"go/parser"
+	"go/token"
 	"io/fs"
 	"log/slog"
 	"os"
@@ -96,8 +98,12 @@ func IndexProject(ctx context.Context, s *store.Store, pm *ParserManager, allowe
 
 		// Import edges
 		for _, imp := range extractImports(content, ext) {
-			_ = s.UpsertNode(imp, "import", "", "")
-			_ = s.UpsertEdge(relPath, imp, "imports")
+			if err := s.UpsertNode(imp, "import", "", ""); err != nil {
+				slog.Warn("indexer: upsert import node failed", "import", imp, "err", err)
+			}
+			if err := s.UpsertEdge(relPath, imp, "imports"); err != nil {
+				slog.Warn("indexer: upsert import edge failed", "from", relPath, "to", imp, "err", err)
+			}
 		}
 
 		// Symbol extraction
@@ -105,8 +111,12 @@ func IndexProject(ctx context.Context, s *store.Store, pm *ParserManager, allowe
 		case ".go":
 			for _, sym := range extractGoSymbols(content) {
 				symID := fmt.Sprintf("%s:%s", relPath, sym.Name)
-				_ = s.UpsertNode(symID, sym.Type, sym.Content, "")
-				_ = s.UpsertEdge(relPath, symID, "contains")
+				if err := s.UpsertNode(symID, sym.Type, sym.Content, ""); err != nil {
+					slog.Warn("indexer: upsert symbol node failed", "id", symID, "err", err)
+				}
+				if err := s.UpsertEdge(relPath, symID, "contains"); err != nil {
+					slog.Warn("indexer: upsert symbol edge failed", "from", relPath, "to", symID, "err", err)
+				}
 			}
 		default:
 			lang := extToLang(ext)
@@ -117,8 +127,12 @@ func IndexProject(ctx context.Context, s *store.Store, pm *ParserManager, allowe
 				// Fallback: heuristic extraction (no Wasm parser configured)
 				for _, sym := range extractSymbolsHeuristic(ext, content) {
 					symID := fmt.Sprintf("%s:%s", relPath, sym.Name)
-					_ = s.UpsertNode(symID, sym.Type, sym.Content, "")
-					_ = s.UpsertEdge(relPath, symID, "contains")
+					if err := s.UpsertNode(symID, sym.Type, sym.Content, ""); err != nil {
+						slog.Warn("indexer: upsert symbol node failed", "id", symID, "err", err)
+					}
+					if err := s.UpsertEdge(relPath, symID, "contains"); err != nil {
+						slog.Warn("indexer: upsert symbol edge failed", "from", relPath, "to", symID, "err", err)
+					}
 				}
 				break
 			}
@@ -145,8 +159,12 @@ func IndexProject(ctx context.Context, s *store.Store, pm *ParserManager, allowe
 
 			for _, sym := range syms {
 				symID := fmt.Sprintf("%s:%s", relPath, sym.Name)
-				_ = s.UpsertNode(symID, sym.Type, sym.Content, "")
-				_ = s.UpsertEdge(relPath, symID, "contains")
+				if err := s.UpsertNode(symID, sym.Type, sym.Content, ""); err != nil {
+					slog.Warn("indexer: upsert symbol node failed", "id", symID, "err", err)
+				}
+				if err := s.UpsertEdge(relPath, symID, "contains"); err != nil {
+					slog.Warn("indexer: upsert symbol edge failed", "from", relPath, "to", symID, "err", err)
+				}
 			}
 			if len(syms) > 0 {
 				slog.Debug("indexer: parser symbols extracted",
@@ -183,21 +201,22 @@ func hashContent(data []byte) string {
 	return hex.EncodeToString(h[:])
 }
 
+var skipDirs = map[string]bool{
+	".git": true, "node_modules": true, "vendor": true,
+	".idea": true, ".vscode": true, "__pycache__": true,
+}
+
+var supportedExts = map[string]bool{
+	".go": true, ".ts": true, ".tsx": true, ".js": true, ".jsx": true,
+	".py": true, ".rs": true, ".md": true, ".txt": true,
+}
+
 func shouldSkipDir(name string) bool {
-	skip := map[string]bool{
-		".git": true, "node_modules": true, "vendor": true,
-		".idea": true, ".vscode": true, "__pycache__": true,
-	}
-	return skip[name]
+	return skipDirs[name]
 }
 
 func isSupportedFile(path string) bool {
-	ext := strings.ToLower(filepath.Ext(path))
-	supported := map[string]bool{
-		".go": true, ".ts": true, ".tsx": true, ".js": true, ".jsx": true,
-		".py": true, ".rs": true, ".md": true, ".txt": true,
-	}
-	return supported[ext]
+	return supportedExts[strings.ToLower(filepath.Ext(path))]
 }
 
 func extToType(ext string) string {
@@ -234,14 +253,27 @@ func extToLang(ext string) string {
 
 func extractImports(content, ext string) []string {
 	var imports []string
-	for _, line := range strings.Split(content, "\n") {
-		line = strings.TrimSpace(line)
-		switch ext {
-		case ".go":
-			if strings.HasPrefix(line, `"`) && strings.HasSuffix(line, `"`) {
-				imports = append(imports, strings.Trim(line, `"`))
+	switch ext {
+	case ".go":
+		// Use the Go AST parser for accurate import extraction.
+		// This handles block imports, single-line imports, and aliased imports.
+		fset := token.NewFileSet()
+		f, err := parser.ParseFile(fset, "", content, parser.ImportsOnly)
+		if err != nil {
+			// Fall back to the line-based heuristic if parsing fails (e.g. partial file).
+			return extractGoImportsFallback(content)
+		}
+		for _, imp := range f.Imports {
+			if imp.Path != nil {
+				path := strings.Trim(imp.Path.Value, `"`)
+				if path != "" {
+					imports = append(imports, path)
+				}
 			}
-		case ".py":
+		}
+	case ".py":
+		for _, line := range strings.Split(content, "\n") {
+			line = strings.TrimSpace(line)
 			if strings.HasPrefix(line, "import ") {
 				// Support "import os, sys"
 				mods := strings.Split(strings.TrimPrefix(line, "import "), ",")
@@ -250,20 +282,17 @@ func extractImports(content, ext string) []string {
 				}
 			} else if strings.HasPrefix(line, "from ") {
 				if parts := strings.Fields(line); len(parts) >= 2 {
-					// Handle "from .module import func" or "from module import ..."
-					mod := parts[1]
-					imports = append(imports, mod)
+					imports = append(imports, parts[1])
 				}
 			}
-		case ".ts", ".tsx", ".js", ".jsx":
-			// Handle both 'import ... from "mod"' and 'import "mod"' or 'require("mod")'
+		}
+	case ".ts", ".tsx", ".js", ".jsx":
+		for _, line := range strings.Split(content, "\n") {
+			line = strings.TrimSpace(line)
 			line = strings.ReplaceAll(line, "`", "\"")
 			line = strings.ReplaceAll(line, "'", "\"")
-
 			if strings.Contains(line, "import") || strings.Contains(line, "require(") {
 				parts := strings.Split(line, "\"")
-				// In 'import { x } from "mod"', the path is usually in the second to last part
-				// In 'require("mod")', it's in the second part.
 				for i := 1; i < len(parts); i += 2 {
 					m := strings.TrimSpace(parts[i])
 					if m != "" && m != "from" && !strings.Contains(m, " ") {
@@ -271,6 +300,18 @@ func extractImports(content, ext string) []string {
 					}
 				}
 			}
+		}
+	}
+	return imports
+}
+
+// extractGoImportsFallback is used when the Go AST parser cannot parse the file.
+func extractGoImportsFallback(content string) []string {
+	var imports []string
+	for _, line := range strings.Split(content, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, `"`) && strings.HasSuffix(line, `"`) {
+			imports = append(imports, strings.Trim(line, `"`))
 		}
 	}
 	return imports
