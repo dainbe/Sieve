@@ -47,13 +47,6 @@ func (pm *ParserManager) Close() error {
 	return pm.runtime.Close(pm.ctx)
 }
 
-// ClearCache clears the compiled module cache.
-func (pm *ParserManager) ClearCache() {
-	pm.mu.Lock()
-	defer pm.mu.Unlock()
-	pm.modules = make(map[string]wazero.CompiledModule)
-}
-
 // Parse runs the Wasm parser for lang against code and returns a JSON string.
 // Returns an error if no parser Wasm file exists for lang.
 //
@@ -71,7 +64,7 @@ func (pm *ParserManager) Parse(ctx context.Context, lang, code string) (string, 
 	if err != nil {
 		return "", fmt.Errorf("instantiate parser %s: %w", lang, err)
 	}
-	defer mod.Close(ctx)
+	defer mod.Close(ctx) //nolint:errcheck
 
 	malloc := mod.ExportedFunction("malloc")
 	free := mod.ExportedFunction("free")
@@ -104,15 +97,21 @@ func (pm *ParserManager) Parse(ctx context.Context, lang, code string) (string, 
 	}
 	defer free.Call(ctx, uint64(resultPtr)) //nolint:errcheck
 
-	// Read null-terminated JSON from Wasm memory
+	// Read null-terminated JSON from Wasm memory.
+	// Cap at maxParserResultBytes to guard against buggy parsers that never
+	// write a null terminator.
+	const maxParserResultBytes = 8 * 1024 * 1024
 	mem := mod.Memory()
-	var out []byte
+	out := make([]byte, 0, 4096)
 	for i := resultPtr; ; i++ {
 		b, ok := mem.ReadByte(i)
 		if !ok || b == 0 {
 			break
 		}
 		out = append(out, b)
+		if len(out) > maxParserResultBytes {
+			return "", fmt.Errorf("parser %s: result exceeds %d byte cap", lang, maxParserResultBytes)
+		}
 	}
 	return string(out), nil
 }

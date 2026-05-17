@@ -14,6 +14,7 @@ func (b *Builder) computeBranches(includedIDs map[string]bool) []Branch {
 	if err != nil {
 		return nil
 	}
+	symbolCounts, _ := b.store.GetSymbolCountsByDir()
 
 	type dirStat struct {
 		total   int
@@ -48,10 +49,11 @@ func (b *Builder) computeBranches(includedIDs map[string]bool) []Branch {
 		hint := fmt.Sprintf("%d file(s) not yet in context", uncovered)
 		summary := dirSummary(dir, stat.files)
 		branches = append(branches, Branch{
-			Path:      dir,
-			FileCount: stat.total,
-			Summary:   summary,
-			Hint:      hint,
+			Path:        dir,
+			FileCount:   stat.total,
+			SymbolCount: symbolCounts[dir],
+			Summary:     summary,
+			Hint:        hint,
 		})
 	}
 

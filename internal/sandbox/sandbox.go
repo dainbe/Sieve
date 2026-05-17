@@ -24,9 +24,9 @@ import (
 )
 
 const (
-	defaultTimeout  = 10 * time.Second
-	maxMemoryPages  = 1024        // 64 MiB  (1 page = 64 KiB)
-	maxOutputBytes  = 64 * 1024   // truncate stdout/stderr at 64 KiB
+	defaultTimeout = 10 * time.Second
+	maxMemoryPages = 1024      // 64 MiB  (1 page = 64 KiB)
+	maxOutputBytes = 64 * 1024 // truncate stdout/stderr at 64 KiB
 )
 
 // RunOptions controls sandbox behaviour.
@@ -72,7 +72,7 @@ func RunWithOptions(ctx context.Context, wasmB64 string, opts RunOptions) (strin
 		WithMemoryLimitPages(maxMemoryPages).
 		WithCloseOnContextDone(true)
 	r := wazero.NewRuntimeWithConfig(ctx, rCfg)
-	defer r.Close(ctx)
+	defer r.Close(context.Background()) //nolint:errcheck
 
 	// 4. WASI
 	wasi_snapshot_preview1.MustInstantiate(ctx, r)

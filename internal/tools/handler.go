@@ -18,6 +18,11 @@ import (
 	"github.com/mark3labs/mcp-go/mcp"
 )
 
+const (
+	maxQueryLen  = 4096            // max length of query / symbol parameters
+	maxStdinSize = 1 * 1024 * 1024 // max stdin payload for QuickExec (1 MiB)
+)
+
 type Handler struct {
 	store       *store.Store
 	builder     *ctxbuilder.Builder
@@ -44,6 +49,9 @@ func (h *Handler) BuildContext(ctx context.Context, req mcp.CallToolRequest) (*m
 	query, ok := req.Params.Arguments["query"].(string)
 	if !ok || query == "" {
 		return mcp.NewToolResultError("query is required"), nil
+	}
+	if len(query) > maxQueryLen {
+		return mcp.NewToolResultError(fmt.Sprintf("query too long (max %d bytes)", maxQueryLen)), nil
 	}
 
 	result, err := h.builder.Build(query)
@@ -162,7 +170,13 @@ func (h *Handler) HybridSearch(ctx context.Context, req mcp.CallToolRequest) (*m
 	if !ok || query == "" {
 		return mcp.NewToolResultError("query is required"), nil
 	}
+	if len(query) > maxQueryLen {
+		return mcp.NewToolResultError(fmt.Sprintf("query too long (max %d bytes)", maxQueryLen)), nil
+	}
 	limit := argInt(req.Params.Arguments["limit"], 10)
+	if limit < 1 {
+		limit = 10
+	}
 	if limit > 100 {
 		limit = 100
 	}
@@ -200,7 +214,13 @@ func (h *Handler) TraceRelation(ctx context.Context, req mcp.CallToolRequest) (*
 	if !ok || symbol == "" {
 		return mcp.NewToolResultError("symbol is required"), nil
 	}
+	if len(symbol) > maxQueryLen {
+		return mcp.NewToolResultError(fmt.Sprintf("symbol too long (max %d bytes)", maxQueryLen)), nil
+	}
 	depth := argInt(req.Params.Arguments["depth"], 2)
+	if depth < 1 {
+		depth = 2
+	}
 	if depth > 5 {
 		depth = 5
 	}
@@ -228,6 +248,9 @@ func (h *Handler) QuickExec(ctx context.Context, req mcp.CallToolRequest) (*mcp.
 		return mcp.NewToolResultError("wasm_b64 too large (max 10 MB base64)"), nil
 	}
 	stdin, _ := req.Params.Arguments["stdin"].(string)
+	if len(stdin) > maxStdinSize {
+		return mcp.NewToolResultError(fmt.Sprintf("stdin too large (max %d bytes)", maxStdinSize)), nil
+	}
 
 	output, err := sandbox.Run(ctx, wasmB64, stdin)
 	if err != nil {

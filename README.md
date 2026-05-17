@@ -1,5 +1,7 @@
 # Sieve
 
+[![CI](https://github.com/dainbe/Sieve/actions/workflows/ci.yml/badge.svg)](https://github.com/dainbe/Sieve/actions/workflows/ci.yml)
+
 AIコーディングエージェントのコンテキストウィンドウを最適化する、超軽量・ローカル完結型 MCP サーバー。
 
 コードの依存関係をグラフ化し、クエリに対して「必要最小限のコンテキスト」だけを自律的に組み立ててAIに渡します。トークン消費を削減しつつ、AIの推論精度を維持します。
@@ -199,6 +201,20 @@ AIエージェント（Claude Code / Codex / Cursor ...）
    SQLite (FTS5 + 知識グラフ)
    wazero サンドボックス
    Go AST パーサー
+```
+
+## 開発
+
+```bash
+# ビルド・テスト
+go build ./...
+go test -race ./...
+
+# Lint
+golangci-lint run ./...
+
+# ベンチマーク
+go test -bench=. -benchmem ./internal/store/... ./internal/context/... ./internal/indexer/...
 ```
 
 ## フェーズ進捗

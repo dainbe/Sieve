@@ -164,6 +164,7 @@ func extractTSFuncName(line string) string {
 func extractTSClassName(line string) string {
 	line = strings.TrimPrefix(line, "abstract ")
 	line = strings.TrimPrefix(line, "class ")
+	line = strings.TrimSpace(line)
 	if idx := strings.IndexAny(line, " {<("); idx > 0 {
 		return strings.TrimSpace(line[:idx])
 	}
@@ -171,7 +172,7 @@ func extractTSClassName(line string) string {
 }
 
 func extractTSSimpleName(line, prefix string) string {
-	rest := strings.TrimPrefix(line, prefix)
+	rest := strings.TrimSpace(strings.TrimPrefix(line, prefix))
 	if idx := strings.IndexAny(rest, " <=({"); idx > 0 {
 		return strings.TrimSpace(rest[:idx])
 	}
@@ -181,6 +182,7 @@ func extractTSSimpleName(line, prefix string) string {
 func extractTSConstName(line string) string {
 	line = strings.TrimPrefix(line, "const ")
 	line = strings.TrimPrefix(line, "let ")
+	line = strings.TrimSpace(line)
 	if idx := strings.IndexAny(line, " :="); idx > 0 {
 		return strings.TrimSpace(line[:idx])
 	}

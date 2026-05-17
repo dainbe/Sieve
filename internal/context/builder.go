@@ -92,41 +92,33 @@ func (b *Builder) Build(query string) (Result, error) {
 		}
 	}
 
-	// Graph expansion with accurate hop tracking
-	type qitem struct {
-		id   string
-		hops int
+	// Graph expansion: single multi-seed CTE call replaces the per-seed BFS loop.
+	seedIDs := make([]string, len(ftsHits))
+	for i, h := range ftsHits {
+		seedIDs[i] = h.ID
 	}
-	queue := make([]qitem, 0, len(ftsHits))
-	for _, h := range ftsHits {
-		queue = append(queue, qitem{h.ID, 0})
-	}
-	for len(queue) > 0 {
-		item := queue[0]
-		queue = queue[1:]
-		if item.hops >= graphDepth {
-			continue
+	hopMap, _, err := b.store.TraceEdgesMulti(seedIDs, graphDepth)
+	if err == nil {
+		// Collect IDs not already in byID (FTS hits) for batch node fetch.
+		var pendingIDs []string
+		for toID := range hopMap {
+			if _, seen := byID[toID]; !seen {
+				pendingIDs = append(pendingIDs, toID)
+			}
 		}
-		edges, err := b.store.TraceEdges(item.id, 1)
-		if err != nil {
-			continue
-		}
-		for _, e := range edges {
-			if _, seen := byID[e.ToID]; seen {
-				continue
+		if len(pendingIDs) > 0 {
+			fetched, fetchErr := b.store.GetNodesIn(pendingIDs)
+			if fetchErr == nil {
+				for id, n := range fetched {
+					hops := hopMap[id]
+					byID[id] = &candidate{
+						node:   n,
+						score:  0.3 / math.Log(float64(hops+2)),
+						source: "graph",
+						hops:   hops,
+					}
+				}
 			}
-			n, err := b.store.GetNode(e.ToID)
-			if err != nil {
-				continue
-			}
-			hops := item.hops + 1
-			byID[e.ToID] = &candidate{
-				node:   n,
-				score:  0.3 / math.Log(float64(hops+2)),
-				source: "graph",
-				hops:   hops,
-			}
-			queue = append(queue, qitem{e.ToID, hops})
 		}
 	}
 
@@ -215,22 +207,32 @@ func (b *Builder) DrillDown(path string) (Result, error) {
 		}
 	}
 
+	// Collect matching IDs, then batch-fetch node content in one query.
+	var matchedIDs []string
+	for _, id := range allIDs {
+		if isExactFile {
+			if id == path {
+				matchedIDs = append(matchedIDs, id)
+			}
+		} else {
+			if id == path || strings.HasPrefix(id, dirPrefix) {
+				matchedIDs = append(matchedIDs, id)
+			}
+		}
+	}
+
+	fetched, err := b.store.GetNodesIn(matchedIDs)
+	if err != nil {
+		return Result{}, fmt.Errorf("fetch nodes: %w", err)
+	}
+
 	var nodes []ContextNode
 	used := 0
 	anySkipped := false
 
-	for _, id := range allIDs {
-		if isExactFile {
-			if id != path {
-				continue
-			}
-		} else {
-			if id != path && !strings.HasPrefix(id, dirPrefix) {
-				continue
-			}
-		}
-		n, err := b.store.GetNode(id)
-		if err != nil {
+	for _, id := range matchedIDs {
+		n, ok := fetched[id]
+		if !ok {
 			continue
 		}
 		// DrillDown returns fuller content than Build

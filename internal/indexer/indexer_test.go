@@ -15,14 +15,14 @@ func setupTest(t *testing.T) (string, *store.Store) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { os.RemoveAll(tmpDir) })
+	t.Cleanup(func() { _ = os.RemoveAll(tmpDir) })
 
 	dbPath := filepath.Join(tmpDir, "test.db")
 	s, err := store.New(dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { s.Close() })
+	t.Cleanup(func() { _ = s.Close() })
 	return tmpDir, s
 }
 
@@ -289,5 +289,86 @@ import (
 	}
 	if len(want) > 0 {
 		t.Errorf("missing imports: %v", want)
+	}
+}
+
+func containsImport(imports []string, target string) bool {
+	for _, imp := range imports {
+		if imp == target {
+			return true
+		}
+	}
+	return false
+}
+
+func TestExtractImports_TS_Basic(t *testing.T) {
+	src := `import React from "react";
+import { useState } from "react";
+export { x } from "./mod";
+const y = require("lodash");`
+	got := extractTSJSImports(src)
+	for _, want := range []string{"react", "./mod", "lodash"} {
+		if !containsImport(got, want) {
+			t.Errorf("expected %q in imports, got %v", want, got)
+		}
+	}
+}
+
+func TestExtractImports_TS_Comments(t *testing.T) {
+	src := `// import "fake-line-comment"
+/* import "fake-block-comment" */
+import "real";`
+	got := extractTSJSImports(src)
+	if containsImport(got, "fake-line-comment") {
+		t.Error("should not extract from single-line comment")
+	}
+	if containsImport(got, "fake-block-comment") {
+		t.Error("should not extract from block comment")
+	}
+	if !containsImport(got, "real") {
+		t.Errorf("should extract real import, got %v", got)
+	}
+}
+
+func TestExtractImports_TS_TemplateLiteral(t *testing.T) {
+	src := "const s = `import \"fake-template\"`;\nimport \"real\";"
+	got := extractTSJSImports(src)
+	if containsImport(got, "fake-template") {
+		t.Errorf("should not extract from template literal, got %v", got)
+	}
+	if !containsImport(got, "real") {
+		t.Errorf("should extract real import, got %v", got)
+	}
+}
+
+func TestExtractImports_TS_Important(t *testing.T) {
+	src := `const important = "value";
+let reimport = "v2";
+import "actual";`
+	got := extractTSJSImports(src)
+	for _, bad := range []string{"value", "v2"} {
+		if containsImport(got, bad) {
+			t.Errorf("identifier containing 'import' should not be matched, found %q", bad)
+		}
+	}
+	if !containsImport(got, "actual") {
+		t.Errorf("real import not found, got %v", got)
+	}
+}
+
+func TestExtractImports_TS_RequireParen(t *testing.T) {
+	src := `const x = require("lodash");`
+	got := extractTSJSImports(src)
+	if !containsImport(got, "lodash") {
+		t.Errorf("require() specifier not found, got %v", got)
+	}
+}
+
+func TestExtractImports_TS_Multiline(t *testing.T) {
+	// The from-line carries the specifier even for multi-line imports
+	src := "import {\n  a,\n  b\n} from \"multi\";"
+	got := extractTSJSImports(src)
+	if !containsImport(got, "multi") {
+		t.Errorf("multi-line import specifier not found, got %v", got)
 	}
 }
