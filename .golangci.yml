@@ -1,19 +1,19 @@
-version: "2"
+run:
+  timeout: 5m
 
 linters:
+  disable-all: true
   enable:
     - errcheck
     - govet
     - staticcheck
     - ineffassign
     - revive
-  settings:
-    revive:
-      rules:
-        - name: exported
-          disabled: true
-
-formatters:
-  enable:
     - gofmt
     - goimports
+
+linters-settings:
+  revive:
+    rules:
+      - name: exported
+        disabled: true
