@@ -9,9 +9,10 @@ import (
 
 type Symbol struct {
 	Name    string
-	Type    string // "function", "type", "variable"
+	Type    string // "function", "type", "variable", "class", etc.
 	Line    int
-	Content string // signature line(s) for use in context compression
+	Content string   // signature line(s) for use in context compression
+	Calls   []string // unqualified names of functions called by this symbol (same file)
 }
 
 func extractGoSymbols(content string) []Symbol {
@@ -58,12 +59,18 @@ func extractGoSymbols(content string) []Symbol {
 	ast.Inspect(f, func(n ast.Node) bool {
 		switch x := n.(type) {
 		case *ast.FuncDecl:
-			sig := sigOf(x.Pos(), x.Body.Lbrace)
+			var sig string
+			if x.Body != nil {
+				sig = sigOf(x.Pos(), x.Body.Lbrace)
+			} else {
+				sig = sigOf(x.Pos(), x.Type.End())
+			}
 			symbols = append(symbols, Symbol{
 				Name:    x.Name.Name,
 				Type:    "function",
 				Line:    fset.Position(x.Pos()).Line,
 				Content: sig,
+				Calls:   extractGoCalls(x.Body),
 			})
 		case *ast.TypeSpec:
 			symbols = append(symbols, Symbol{
@@ -85,4 +92,30 @@ func extractGoSymbols(content string) []Symbol {
 		return true
 	})
 	return symbols
+}
+
+// extractGoCalls collects unqualified function call names within a function body.
+// Only unqualified names are collected (no pkg.Func); qualified calls are already
+// represented by the file's import edges.
+func extractGoCalls(body *ast.BlockStmt) []string {
+	if body == nil {
+		return nil
+	}
+	seen := map[string]bool{}
+	var calls []string
+	ast.Inspect(body, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		if ident, ok := call.Fun.(*ast.Ident); ok {
+			name := ident.Name
+			if !seen[name] {
+				seen[name] = true
+				calls = append(calls, name)
+			}
+		}
+		return true
+	})
+	return calls
 }

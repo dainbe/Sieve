@@ -1,0 +1,9 @@
+# Directories to exclude from Sieve indexing.
+# One pattern per line. Supports exact directory names and glob syntax.
+# Trailing '/' is optional (both "foo" and "foo/" match directory "foo").
+
+# Claude Code internal directories
+.claude/
+
+# Sieve DB
+.sieve/

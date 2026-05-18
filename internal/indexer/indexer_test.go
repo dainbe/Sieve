@@ -2,6 +2,7 @@ package indexer
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -353,6 +354,289 @@ import "actual";`
 	}
 	if !containsImport(got, "actual") {
 		t.Errorf("real import not found, got %v", got)
+	}
+}
+
+// TestIndexProject_CrossFileCallsEdge verifies that a calls edge is written
+// between two symbols in different files within the same package.
+func TestIndexProject_CrossFileCallsEdge(t *testing.T) {
+	tmpDir, s := setupTest(t)
+	ctx := context.Background()
+
+	// a.go: RunA calls RunB (defined in b.go, same directory)
+	srcA := `package mypkg
+
+func RunA() {
+	RunB()
+}
+`
+	// b.go: defines RunB
+	srcB := `package mypkg
+
+func RunB() {}
+`
+	if err := os.WriteFile(filepath.Join(tmpDir, "a.go"), []byte(srcA), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, "b.go"), []byte(srcB), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := IndexProject(ctx, s, nil, "", tmpDir); err != nil {
+		t.Fatalf("IndexProject: %v", err)
+	}
+
+	// Expect edge: a.go:RunA → b.go:RunB with relation "calls"
+	edges, err := s.TraceEdges("a.go:RunA", 1)
+	if err != nil {
+		t.Fatalf("TraceEdges: %v", err)
+	}
+	found := false
+	for _, e := range edges {
+		if e.FromID == "a.go:RunA" && e.ToID == "b.go:RunB" && e.Relation == "calls" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected cross-file calls edge a.go:RunA → b.go:RunB; edges: %v", edges)
+	}
+}
+
+// TestIndexProject_AmbiguousCallSamePackagePreferred verifies that when multiple
+// files define the same symbol name, the same-directory candidate is preferred.
+func TestIndexProject_AmbiguousCallSamePackagePreferred(t *testing.T) {
+	tmpDir, s := setupTest(t)
+	ctx := context.Background()
+
+	// pkg/a.go calls Helper; pkg/b.go and other/c.go both define Helper.
+	pkg := filepath.Join(tmpDir, "pkg")
+	other := filepath.Join(tmpDir, "other")
+	if err := os.MkdirAll(pkg, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(other, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	srcA := `package pkg
+
+func RunA() {
+	Helper()
+}
+`
+	srcB := `package pkg
+
+func Helper() {}
+`
+	srcC := `package other
+
+func Helper() {}
+`
+	if err := os.WriteFile(filepath.Join(pkg, "a.go"), []byte(srcA), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pkg, "b.go"), []byte(srcB), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(other, "c.go"), []byte(srcC), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := IndexProject(ctx, s, nil, "", tmpDir); err != nil {
+		t.Fatalf("IndexProject: %v", err)
+	}
+
+	edges, err := s.TraceEdges("pkg/a.go:RunA", 1)
+	if err != nil {
+		t.Fatalf("TraceEdges: %v", err)
+	}
+
+	wantTarget := "pkg/b.go:Helper"
+	badTarget := "other/c.go:Helper"
+	var gotTarget string
+	for _, e := range edges {
+		if e.Relation == "calls" {
+			gotTarget = e.ToID
+		}
+	}
+	if gotTarget != wantTarget {
+		t.Errorf("same-package preference: want %q, got %q (bad: %q in edges %v)",
+			wantTarget, gotTarget, badTarget, edges)
+	}
+}
+
+// TestIndexProject_ParallelDeterminism verifies that indexing with multiple workers
+// produces the same node/edge counts and cross-file call edges as a single worker.
+// This catches data races and non-determinism introduced by parallel parsing.
+func TestIndexProject_ParallelDeterminism(t *testing.T) {
+	// Build a mini project with cross-file calls and multiple languages.
+	makeProject := func(t *testing.T) string {
+		t.Helper()
+		dir, err := os.MkdirTemp("", "sieve-parallel-*")
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.RemoveAll(dir) })
+		sub := filepath.Join(dir, "sub")
+		if err := os.Mkdir(sub, 0755); err != nil {
+			t.Fatal(err)
+		}
+		files := map[string]string{
+			filepath.Join(dir, "main.go"): `package main
+import "fmt"
+func main() { Greet("world") }
+func Greet(s string) { fmt.Println(s) }
+`,
+			filepath.Join(dir, "util.go"): `package main
+func Helper() {}
+func AnotherHelper() { Helper() }
+`,
+			filepath.Join(sub, "sub.go"): `package sub
+func SubFunc() {}
+func SubCaller() { SubFunc() }
+`,
+			filepath.Join(dir, "readme.md"): "# Project\nSome docs.\n",
+			filepath.Join(dir, "script.py"): `def process(): pass
+def run(): process()
+`,
+		}
+		for path, content := range files {
+			if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return dir
+	}
+
+	// Index with nWorkers, return (nodeCount, edgeCount, sorted node IDs).
+	indexWith := func(t *testing.T, nWorkers int) (int64, int64, []string) {
+		t.Helper()
+		t.Setenv("SIEVE_INDEX_WORKERS", fmt.Sprintf("%d", nWorkers))
+		// Force re-evaluation of the package-level var for the test.
+		old := indexWorkers
+		indexWorkers = nWorkers
+		t.Cleanup(func() { indexWorkers = old })
+
+		dir := makeProject(t)
+		_, s := setupTest(t)
+		ctx := context.Background()
+
+		n, err := IndexProject(ctx, s, nil, "", dir)
+		if err != nil {
+			t.Fatalf("IndexProject (workers=%d): %v", nWorkers, err)
+		}
+		if n == 0 {
+			t.Errorf("expected >0 files indexed with %d workers", nWorkers)
+		}
+
+		nodes, edges, err := s.Stats()
+		if err != nil {
+			t.Fatal(err)
+		}
+		ids, _ := s.GetAllFileNodeIDs()
+		return nodes, edges, ids
+	}
+
+	nodes1, edges1, ids1 := indexWith(t, 1)
+	nodes4, edges4, ids4 := indexWith(t, 4)
+	nodes8, edges8, ids8 := indexWith(t, 8)
+
+	if nodes1 != nodes4 || nodes1 != nodes8 {
+		t.Errorf("node count mismatch: 1=%d 4=%d 8=%d", nodes1, nodes4, nodes8)
+	}
+	if edges1 != edges4 || edges1 != edges8 {
+		t.Errorf("edge count mismatch: 1=%d 4=%d 8=%d", edges1, edges4, edges8)
+	}
+	if len(ids1) != len(ids4) || len(ids1) != len(ids8) {
+		t.Errorf("file node count mismatch: 1=%d 4=%d 8=%d", len(ids1), len(ids4), len(ids8))
+	}
+	_ = ids1
+	_ = ids4
+	_ = ids8
+}
+
+// TestIndexProject_ParallelCrossFileEdges verifies cross-file call edges are
+// correctly resolved regardless of the number of parallel workers.
+func TestIndexProject_ParallelCrossFileEdges(t *testing.T) {
+	dir, err := os.MkdirTemp("", "sieve-xfile-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+
+	pkgA := `package a
+func Caller() { Callee() }
+`
+	pkgB := `package a
+func Callee() {}
+`
+	if err := os.WriteFile(filepath.Join(dir, "a.go"), []byte(pkgA), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "b.go"), []byte(pkgB), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, nw := range []int{1, 2, 4} {
+		t.Run(fmt.Sprintf("workers=%d", nw), func(t *testing.T) {
+			old := indexWorkers
+			indexWorkers = nw
+			defer func() { indexWorkers = old }()
+
+			_, s := setupTest(t)
+			if _, err := IndexProject(context.Background(), s, nil, "", dir); err != nil {
+				t.Fatalf("IndexProject: %v", err)
+			}
+			edges, err := s.TraceEdges("a.go:Caller", 1)
+			if err != nil {
+				t.Fatalf("TraceEdges: %v", err)
+			}
+			var found bool
+			for _, e := range edges {
+				if e.Relation == "calls" && e.ToID == "b.go:Callee" {
+					found = true
+				}
+			}
+			if !found {
+				t.Errorf("cross-file call edge a.go:Caller→b.go:Callee not found with %d workers; edges=%v", nw, edges)
+			}
+		})
+	}
+}
+
+// BenchmarkIndexProject_Workers measures indexing throughput vs worker count
+// against the real Sieve repo. Run with: go test -bench=BenchmarkIndexProject_Workers
+func BenchmarkIndexProject_Workers(b *testing.B) {
+	repoRoot, err := filepath.Abs("../..")
+	if err != nil {
+		b.Skip("cannot resolve repo root")
+	}
+
+	for _, nw := range []int{1, 2, 4, 8} {
+		nw := nw
+		b.Run(fmt.Sprintf("workers=%d", nw), func(b *testing.B) {
+			old := indexWorkers
+			indexWorkers = nw
+			defer func() { indexWorkers = old }()
+
+			dbPath := filepath.Join(b.TempDir(), "bench.db")
+			s, err := store.New(dbPath)
+			if err != nil {
+				b.Fatal(err)
+			}
+			defer func() { _ = s.Close() }()
+
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				if err := s.Reset(); err != nil {
+					b.Fatal(err)
+				}
+				if _, err := IndexProject(context.Background(), s, nil, repoRoot, repoRoot); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
 	}
 }
 

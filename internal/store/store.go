@@ -2,7 +2,9 @@ package store
 
 import (
 	"database/sql"
+	"encoding/binary"
 	"fmt"
+	"math"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -74,6 +76,10 @@ func New(path string) (*Store, error) {
 	if _, err := db.Exec(schema); err != nil {
 		return nil, fmt.Errorf("apply schema: %w", err)
 	}
+	if err := migrate(db); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("migrate: %w", err)
+	}
 	return &Store{db: db, path: path}, nil
 }
 
@@ -86,6 +92,20 @@ func (s *Store) Close() error {
 	defer s.mu.Unlock()
 	_, _ = s.db.Exec(`PRAGMA wal_checkpoint(TRUNCATE)`)
 	return s.db.Close()
+}
+
+// Optimize runs SQLite query-plan analysis and a passive WAL checkpoint.
+// Safe to call at any time; PRAGMA optimize tracks its own run-time internally.
+func (s *Store) Optimize() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, err := s.db.Exec(`PRAGMA analysis_limit=400; PRAGMA optimize`); err != nil {
+		return fmt.Errorf("pragma optimize: %w", err)
+	}
+	if _, err := s.db.Exec(`PRAGMA wal_checkpoint(PASSIVE)`); err != nil {
+		return fmt.Errorf("wal checkpoint: %w", err)
+	}
+	return nil
 }
 
 func (s *Store) Stats() (nodeCount, edgeCount int64, err error) {
@@ -104,6 +124,27 @@ func (s *Store) IsHashCurrent(id, hash string) bool {
 	var stored string
 	err := s.db.QueryRow(`SELECT hash FROM nodes WHERE id = ?`, id).Scan(&stored)
 	return err == nil && stored == hash
+}
+
+// GetAllFileHashes returns id→hash for every node with a non-empty hash (i.e. indexed
+// file nodes). Used by parallel indexing workers to skip unchanged files before parsing.
+func (s *Store) GetAllFileHashes() (map[string]string, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	rows, err := s.db.Query(`SELECT id, hash FROM nodes WHERE hash != ''`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	m := make(map[string]string, 256)
+	for rows.Next() {
+		var id, h string
+		if err := rows.Scan(&id, &h); err != nil {
+			return nil, err
+		}
+		m[id] = h
+	}
+	return m, rows.Err()
 }
 
 func (s *Store) Exists(id string) bool {
@@ -182,6 +223,34 @@ func (s *Store) GetAllFileNodeIDs() ([]string, error) {
 	return ids, rows.Err()
 }
 
+// GetFileNodesByPrefix returns file nodes whose IDs start with prefix (exact
+// file match or directory prefix match). Uses SQL GLOB for a single index scan.
+func (s *Store) GetFileNodesByPrefix(prefix string) ([]Node, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	// Match exact file ID or files under directory prefix/.
+	// GLOB uses * and ? as wildcards; escape any literal * or ? in the prefix.
+	escaped := strings.NewReplacer("*", `\*`, "?", `\?`, `\`, `\\`).Replace(prefix)
+	pattern := escaped + "*"
+	rows, err := s.db.Query(
+		`SELECT id, type, content FROM nodes WHERE (id = ? OR id GLOB ?) AND type LIKE '%_file'`,
+		prefix, pattern,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close() //nolint:errcheck
+	var nodes []Node
+	for rows.Next() {
+		var n Node
+		if err := rows.Scan(&n.ID, &n.Type, &n.Content); err != nil {
+			return nil, err
+		}
+		nodes = append(nodes, n)
+	}
+	return nodes, rows.Err()
+}
+
 // GetSymbolCountsByDir returns a map from directory path to symbol node count.
 // Symbol nodes are those whose IDs contain ":" (format: "file.go:SymbolName").
 func (s *Store) GetSymbolCountsByDir() (map[string]int, error) {
@@ -213,19 +282,43 @@ func (s *Store) GetSymbolCountsByDir() (map[string]int, error) {
 }
 
 func (s *Store) FTSSearch(query string, limit int) ([]Node, error) {
+	return s.ftsSearch(query, limit, false)
+}
+
+// FTSSearchFiles is like FTSSearch but restricts results to file-type nodes
+// (type ending in "_file"). Use this for context building so that file-level
+// relevance is not dominated by shorter symbol nodes.
+func (s *Store) FTSSearchFiles(query string, limit int) ([]Node, error) {
+	return s.ftsSearch(query, limit, true)
+}
+
+func (s *Store) ftsSearch(query string, limit int, filesOnly bool) ([]Node, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	safe := sanitizeFTS(query)
 	if safe == "" {
 		return nil, nil
 	}
-	rows, err := s.db.Query(
-		`SELECT n.id, n.type, n.content
-		 FROM fts_nodes f JOIN nodes n ON f.id = n.id
-		 WHERE fts_nodes MATCH ?
-		 ORDER BY rank LIMIT ?`,
-		safe, limit,
-	)
+	return s.runFTSQuery(safe, limit, filesOnly)
+}
+
+// runFTSQuery executes a single FTS query without acquiring the store lock.
+// Must be called with at least s.mu.RLock held.
+func (s *Store) runFTSQuery(safe string, limit int, filesOnly bool) ([]Node, error) {
+	// -bm25 converts SQLite's negative rank to a positive score (higher = better).
+	var q string
+	if filesOnly {
+		q = `SELECT n.id, n.type, n.content, -bm25(fts_nodes)
+			 FROM fts_nodes f JOIN nodes n ON f.id = n.id
+			 WHERE fts_nodes MATCH ? AND n.type LIKE '%_file'
+			 ORDER BY rank LIMIT ?`
+	} else {
+		q = `SELECT n.id, n.type, n.content, -bm25(fts_nodes)
+			 FROM fts_nodes f JOIN nodes n ON f.id = n.id
+			 WHERE fts_nodes MATCH ?
+			 ORDER BY rank LIMIT ?`
+	}
+	rows, err := s.db.Query(q, safe, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -233,9 +326,10 @@ func (s *Store) FTSSearch(query string, limit int) ([]Node, error) {
 	var nodes []Node
 	for rows.Next() {
 		var n Node
-		if err := rows.Scan(&n.ID, &n.Type, &n.Content); err != nil {
+		if err := rows.Scan(&n.ID, &n.Type, &n.Content, &n.Score); err != nil {
 			return nil, err
 		}
+		n.Content = StripAugment(n.Content)
 		nodes = append(nodes, n)
 	}
 	return nodes, rows.Err()
@@ -248,17 +342,17 @@ func (s *Store) GetNode(id string) (Node, error) {
 	err := s.db.QueryRow(
 		`SELECT id, type, content FROM nodes WHERE id = ?`, id,
 	).Scan(&n.ID, &n.Type, &n.Content)
+	n.Content = StripAugment(n.Content)
 	return n, err
 }
 
 func (s *Store) Reset() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if _, err := s.db.Exec(`DELETE FROM edges`); err != nil {
-		return err
-	}
-	if _, err := s.db.Exec(`DELETE FROM nodes`); err != nil {
-		return err
+	for _, table := range []string{"edges", "nodes", "term_neighbors", "vectors"} {
+		if _, err := s.db.Exec(`DELETE FROM ` + table); err != nil {
+			return err
+		}
 	}
 	_, err := s.db.Exec(`VACUUM`)
 	return err
@@ -360,8 +454,25 @@ LIMIT 50000`
 			seen[key] = true
 			edges = append(edges, e)
 		}
-		if prev, ok := hops[e.ToID]; !ok || depth < prev {
-			hops[e.ToID] = depth
+		// contains edges don't count as hops (symbol within a file = same distance as the file)
+		if e.Relation != "contains" {
+			if prev, ok := hops[e.ToID]; !ok || depth < prev {
+				hops[e.ToID] = depth
+			}
+		}
+	}
+	// Second pass: propagate parent hop count through contains edges so symbols
+	// within an already-reached file inherit the file's hop distance.
+	for _, e := range edges {
+		if e.Relation != "contains" {
+			continue
+		}
+		parentHop, ok := hops[e.FromID]
+		if !ok {
+			continue
+		}
+		if prev, ok := hops[e.ToID]; !ok || parentHop < prev {
+			hops[e.ToID] = parentHop
 		}
 	}
 	return hops, edges, rows.Err()
@@ -418,6 +529,7 @@ func (s *Store) GetNodesIn(ids []string) (map[string]Node, error) {
 				rows.Close() //nolint:errcheck
 				return nil, err
 			}
+			n.Content = StripAugment(n.Content)
 			result[n.ID] = n
 		}
 		if err := rows.Close(); err != nil {
@@ -517,28 +629,233 @@ func (b *Batch) DeleteNode(id string) error {
 	return err
 }
 
+var ftsStopWords = map[string]bool{
+	"a": true, "an": true, "and": true, "or": true, "the": true,
+	"of": true, "to": true, "in": true, "is": true, "for": true,
+	"on": true, "with": true, "by": true, "at": true, "as": true,
+	"it": true, "be": true, "do": true, "if": true, "we": true,
+}
+
+// TokenizeFTS returns sanitized, stemmed tokens from query suitable for FTS
+// coverage matching. Stopwords and single-char tokens are removed; tokens ≥10
+// chars are trimmed by 3 (minimum length 5) so that "compression" matches
+// "compressFile", "truncation" matches "truncateLines", etc.
+func TokenizeFTS(query string) []string {
+	seen := map[string]bool{}
+	var tokens []string
+	for _, t := range strings.Fields(strings.ToLower(query)) {
+		t = strings.Trim(t, `"'.,;:!?()[]{}/\`)
+		if len(t) <= 1 || ftsStopWords[t] || seen[t] {
+			continue
+		}
+		if len(t) >= 10 {
+			s := len(t) - 3
+			if s < 5 {
+				s = 5
+			}
+			t = t[:s]
+		}
+		seen[t] = true
+		tokens = append(tokens, t)
+	}
+	return tokens
+}
+
 func sanitizeFTS(q string) string {
 	q = strings.TrimSpace(q)
 	if q == "" {
 		return ""
 	}
-	tokens := strings.Fields(q)
-	quoted := make([]string, 0, len(tokens))
-	for _, t := range tokens {
-		t = strings.ReplaceAll(t, `"`, `""`)
-		quoted = append(quoted, `"`+t+`"`)
+	var parts []string
+	for _, t := range TokenizeFTS(q) {
+		escaped := strings.ReplaceAll(t, `"`, `""`)
+		isAlnum := true
+		for _, ch := range escaped {
+			if (ch < 'a' || ch > 'z') && (ch < '0' || ch > '9') && ch != '_' {
+				isAlnum = false
+				break
+			}
+		}
+		if isAlnum && len(escaped) >= 3 {
+			parts = append(parts, `"`+escaped+`"*`)
+		} else if len(escaped) >= 2 {
+			parts = append(parts, `"`+escaped+`"`)
+		}
 	}
-	return strings.Join(quoted, " ")
+	if len(parts) == 0 {
+		return ""
+	}
+	return strings.Join(parts, " OR ")
+}
+
+// FTSAugmentSentinel marks the start of the identifier-split augmentation block
+// appended to file node content at index time. Everything from this marker to
+// end-of-string is stripped before content is returned to callers.
+const FTSAugmentSentinel = "\n\n<!--SIEVE_IDX\n"
+
+// StripAugment removes the FTS augmentation block appended at index time.
+// If no sentinel is present, s is returned unchanged.
+func StripAugment(s string) string {
+	if i := strings.Index(s, FTSAugmentSentinel); i >= 0 {
+		return s[:i]
+	}
+	return s
 }
 
 type Node struct {
 	ID      string
 	Type    string
 	Content string
+	Score   float64 // BM25 relevance score (positive, higher = more relevant); 0 for non-FTS results
 }
 
 type Edge struct {
 	FromID   string `json:"from_id"`
 	ToID     string `json:"to_id"`
 	Relation string `json:"relation"`
+}
+
+// TermNeighbor is a (term, neighbor, weight) triple for PPMI query expansion.
+type TermNeighbor struct {
+	Term     string
+	Neighbor string
+	Weight   float64
+}
+
+// GetAllFileNodes returns all file-type nodes with their content.
+func (s *Store) GetAllFileNodes() ([]Node, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	rows, err := s.db.Query(`SELECT id, type, content FROM nodes WHERE type LIKE '%_file'`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close() //nolint:errcheck
+	var nodes []Node
+	for rows.Next() {
+		var n Node
+		if err := rows.Scan(&n.ID, &n.Type, &n.Content); err != nil {
+			return nil, err
+		}
+		n.Content = StripAugment(n.Content)
+		nodes = append(nodes, n)
+	}
+	return nodes, rows.Err()
+}
+
+// ReplaceTermNeighbors atomically replaces all rows in term_neighbors with pairs.
+func (s *Store) ReplaceTermNeighbors(pairs []TermNeighbor) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM term_neighbors`); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	stmt, err := tx.Prepare(`INSERT INTO term_neighbors(term, neighbor, weight) VALUES(?,?,?)`)
+	if err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	defer stmt.Close() //nolint:errcheck
+	for _, p := range pairs {
+		if _, err := stmt.Exec(p.Term, p.Neighbor, p.Weight); err != nil {
+			_ = tx.Rollback()
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+// UpsertVector stores a dense embedding vector for nodeID.
+// vec is stored as a little-endian IEEE 754 blob.
+func (s *Store) UpsertVector(nodeID string, vec []float32) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, err := s.db.Exec(
+		`INSERT INTO vectors(node_id, dim, vec) VALUES(?,?,?)
+		 ON CONFLICT(node_id) DO UPDATE SET dim=excluded.dim, vec=excluded.vec`,
+		nodeID, len(vec), float32sToBlob(vec),
+	)
+	return err
+}
+
+// LoadAllVectors reads every row from the vectors table and returns a map of
+// node_id → embedding. Returns an empty map (not nil) when no vectors exist.
+func (s *Store) LoadAllVectors() (map[string][]float32, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	rows, err := s.db.Query(`SELECT node_id, dim, vec FROM vectors`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close() //nolint:errcheck
+	result := map[string][]float32{}
+	for rows.Next() {
+		var nodeID string
+		var dim int
+		var blob []byte
+		if err := rows.Scan(&nodeID, &dim, &blob); err != nil {
+			return nil, err
+		}
+		result[nodeID] = blobToFloat32s(blob, dim)
+	}
+	return result, rows.Err()
+}
+
+// float32sToBlob encodes a float32 slice as a little-endian byte blob.
+func float32sToBlob(v []float32) []byte {
+	buf := make([]byte, len(v)*4)
+	for i, f := range v {
+		binary.LittleEndian.PutUint32(buf[i*4:], math.Float32bits(f))
+	}
+	return buf
+}
+
+// blobToFloat32s decodes a little-endian byte blob into a float32 slice of length dim.
+func blobToFloat32s(b []byte, dim int) []float32 {
+	v := make([]float32, dim)
+	for i := range v {
+		if i*4+4 > len(b) {
+			break
+		}
+		v[i] = math.Float32frombits(binary.LittleEndian.Uint32(b[i*4:]))
+	}
+	return v
+}
+
+// GetTermNeighbors returns up to n neighbors for term, ordered by weight descending.
+func (s *Store) GetTermNeighbors(term string, n int) ([]string, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	rows, err := s.db.Query(
+		`SELECT neighbor FROM term_neighbors WHERE term = ? ORDER BY weight DESC LIMIT ?`,
+		term, n,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close() //nolint:errcheck
+	var neighbors []string
+	for rows.Next() {
+		var nb string
+		if err := rows.Scan(&nb); err != nil {
+			return nil, err
+		}
+		neighbors = append(neighbors, nb)
+	}
+	return neighbors, rows.Err()
+}
+
+// TermNeighborsCount returns the number of rows in term_neighbors.
+// Used by BuildPPMI to determine whether the table is populated.
+func (s *Store) TermNeighborsCount() (int64, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var count int64
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM term_neighbors`).Scan(&count)
+	return count, err
 }

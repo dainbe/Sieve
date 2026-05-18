@@ -1,0 +1,185 @@
+[
+  {
+    "id": "store-schema",
+    "query": "SQLite schema definition and table creation",
+    "ground_truth_files": ["internal/store/store.go", "internal/store/migrate.go"],
+    "notes": "Schema const in store.go, migration logic in migrate.go"
+  },
+  {
+    "id": "fts-search",
+    "query": "full text search FTS5 query implementation",
+    "ground_truth_files": ["internal/store/store.go", "internal/context/builder.go"],
+    "notes": "FTSSearch/FTSSearchFiles in store.go; builder.go drives the query and uses results"
+  },
+  {
+    "id": "bfs-trace",
+    "query": "BFS graph traversal knowledge graph edges",
+    "ground_truth_files": ["internal/store/store.go", "internal/context/builder.go"],
+    "notes": "TraceEdges and TraceEdgesMulti use recursive CTE; builder.go calls TraceEdgesMulti for graph expansion"
+  },
+  {
+    "id": "wasm-sandbox",
+    "query": "WebAssembly sandbox execution wazero",
+    "ground_truth_files": ["internal/sandbox/sandbox.go"],
+    "notes": "sandbox.Run uses wazero runtime"
+  },
+  {
+    "id": "wasm-parser",
+    "query": "Wasm parser malloc free parse ABI",
+    "ground_truth_files": ["internal/indexer/parser.go", "internal/indexer/indexer.go"],
+    "notes": "ParserManager.Parse in parser.go; indexer.go uses ParserManager to process files"
+  },
+  {
+    "id": "go-symbols",
+    "query": "Go AST symbol extraction function type variable",
+    "ground_truth_files": ["internal/indexer/symbols.go", "internal/indexer/indexer.go"],
+    "notes": "extractGoSymbols uses go/ast; indexer.go dispatches to it and stores symbol nodes"
+  },
+  {
+    "id": "token-budget",
+    "query": "token budget compression truncation context window",
+    "ground_truth_files": ["internal/context/builder.go"],
+    "notes": "Build fills token budget via estimateTokens/compress/compressFile"
+  },
+  {
+    "id": "mcp-tools",
+    "query": "MCP tool registration handler BuildContext IndexProject",
+    "ground_truth_files": [
+      "internal/tools/handler.go",
+      "internal/tools/registry.go"
+    ],
+    "notes": "handler.go has method implementations, registry.go registers them"
+  },
+  {
+    "id": "incremental-index",
+    "query": "incremental indexing hash change detection file walk",
+    "ground_truth_files": ["internal/indexer/indexer.go"],
+    "notes": "readAndParseFile/writeParsedFile in indexer.go handle hash-based change detection and file walk"
+  },
+  {
+    "id": "db-migration",
+    "query": "database schema migration user_version upgrade",
+    "ground_truth_files": ["internal/store/migrate.go"],
+    "notes": "migrate() reads PRAGMA user_version and applies migrations"
+  },
+  {
+    "id": "context-build",
+    "query": "context building FTS graph expansion relevance scoring",
+    "ground_truth_files": ["internal/context/builder.go", "internal/store/store.go"],
+    "notes": "Build() in builder.go calls FTSSearchFiles/TraceEdgesMulti from store.go"
+  },
+  {
+    "id": "heuristic-python",
+    "query": "Python symbol extraction def class heuristic",
+    "ground_truth_files": ["internal/indexer/heuristic.go"],
+    "notes": "extractPythonSymbols handles def/class/decorators"
+  },
+  {
+    "id": "allowed-root",
+    "query": "allowed root path validation security traversal",
+    "ground_truth_files": ["internal/indexer/indexer.go", "main.go"],
+    "notes": "resolveRoots enforces path prefix containment; main.go reads SIEVE_ALLOWED_ROOT env var"
+  },
+  {
+    "id": "main-startup",
+    "query": "server startup MCP stdio SIEVE_ALLOWED_ROOT environment variable",
+    "ground_truth_files": ["main.go"],
+    "notes": "main.go reads env vars and starts server.ServeStdio"
+  },
+  {
+    "id": "drill-down",
+    "query": "drill down directory branch context exploration",
+    "ground_truth_files": ["internal/context/builder.go", "internal/context/builder_branches.go"],
+    "notes": "DrillDown in builder.go; branch computation in builder_branches.go"
+  },
+  {
+    "id": "ppmi-cooccur",
+    "query": "PPMI co-occurrence BuildPPMI term neighbors corpus",
+    "ground_truth_files": ["internal/expand/cooccur.go"],
+    "notes": "cooccur.go has BuildPPMI, ExpandQuery, document-level PPMI calculation"
+  },
+  {
+    "id": "ppmi-expand",
+    "query": "ExpandQuery SIEVE_QUERY_EXPANSION expand cooccur builder token",
+    "ground_truth_files": ["internal/expand/cooccur.go", "internal/context/builder.go"],
+    "notes": "ExpandQuery defined in cooccur.go; builder.go calls it when SIEVE_QUERY_EXPANSION is set"
+  },
+  {
+    "id": "camelcase-split",
+    "query": "SplitIdentifiers camelCase PascalCase snake_case identifier split",
+    "ground_truth_files": ["internal/indexer/tokensplit.go"],
+    "notes": "tokensplit.go implements SplitIdentifiers for FTS vocabulary expansion"
+  },
+  {
+    "id": "augment-content",
+    "query": "augmentContent vocabulary FTS token content augment index",
+    "ground_truth_files": ["internal/indexer/tokensplit.go"],
+    "notes": "augmentContent in tokensplit.go appends split tokens to file content before FTS indexing"
+  },
+  {
+    "id": "fts-sentinel",
+    "query": "FTSAugmentSentinel StripAugment sentinel strip augment content",
+    "ground_truth_files": ["internal/store/store.go", "internal/indexer/tokensplit.go"],
+    "notes": "store.go has FTSAugmentSentinel/StripAugment; tokensplit.go calls FTSAugmentSentinel in augmentContent"
+  },
+  {
+    "id": "cross-file-resolve",
+    "query": "resolveCrossFileCalls pendingCall nameIndex symbolEntry",
+    "ground_truth_files": ["internal/indexer/resolve.go"],
+    "notes": "resolve.go implements pass-2 cross-file call edge resolution using nameIndex"
+  },
+  {
+    "id": "score-threshold",
+    "query": "SIEVE_SCORE_THRESHOLD threshold topComposite cutoff score relative",
+    "ground_truth_files": ["internal/context/builder.go"],
+    "notes": "builder.go reads SIEVE_SCORE_THRESHOLD and applies relative cutoff against topComposite"
+  },
+  {
+    "id": "parallel-indexer",
+    "query": "parsedFile parallel worker goroutine channel pipeline batch",
+    "ground_truth_files": ["internal/indexer/indexer.go"],
+    "notes": "indexer.go implements 3-phase parallel parse pipeline with parsedFile channel"
+  },
+  {
+    "id": "restart-server",
+    "query": "RestartServer restartCh exit channel signal process",
+    "ground_truth_files": ["internal/tools/handler.go", "main.go"],
+    "notes": "handler.go has RestartServer and restartCh field; main.go wires restartCh to os.Exit"
+  },
+  {
+    "id": "optimize-pragma",
+    "query": "Optimize PRAGMA WAL checkpoint analysis_limit SQLite",
+    "ground_truth_files": ["internal/store/store.go"],
+    "notes": "store.go Optimize() runs PRAGMA analysis_limit=400; PRAGMA optimize and WAL checkpoint"
+  },
+  {
+    "id": "init-session",
+    "query": "Init initResponse newly_indexed auto-index optimized session",
+    "ground_truth_files": ["internal/tools/handler.go"],
+    "notes": "handler.go Init() auto-indexes when empty, optimizes SQLite, returns initResponse"
+  },
+  {
+    "id": "status-uptime",
+    "query": "Status uptime node_count edge_count memory version server",
+    "ground_truth_files": ["internal/tools/handler.go", "internal/tools/registry.go"],
+    "notes": "handler.go has Status() implementation; registry.go description lists uptime/version/node/edge/memory"
+  },
+  {
+    "id": "reset-confirm",
+    "query": "ResetIndex yes-delete-all confirm wipe destructive guard",
+    "ground_truth_files": ["internal/tools/handler.go", "internal/tools/registry.go"],
+    "notes": "handler.go has ResetIndex implementation; registry.go description mentions yes-delete-all and destructive guard"
+  },
+  {
+    "id": "heuristic-ts-rust",
+    "query": "TypeScript JavaScript extractTSSymbols extractRustSymbols struct enum trait",
+    "ground_truth_files": ["internal/indexer/heuristic.go"],
+    "notes": "heuristic.go has extractTSSymbols and extractRustSymbols for non-Go languages"
+  },
+  {
+    "id": "branch-compute",
+    "query": "computeBranches directory branch path listing sorted coverage",
+    "ground_truth_files": ["internal/context/builder_branches.go"],
+    "notes": "builder_branches.go computeBranches builds dir coverage stats and branch listing"
+  }
+]

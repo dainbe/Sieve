@@ -97,19 +97,20 @@ func RunWithOptions(ctx context.Context, wasmB64 string, opts RunOptions) (strin
 		}
 	}
 
-	// 7. Compile + instantiate — run in a dedicated goroutine so that
-	//    a CPU-spinning Wasm module is killed when the context deadline fires.
+	// 7. Compile + instantiate — both run in a dedicated goroutine so that
+	//    a CPU-spinning or slow-compiling Wasm binary is cancelled when the
+	//    context deadline fires.
 	type result struct {
 		err error
 	}
 	done := make(chan result, 1)
 
-	compiled, err := r.CompileModule(ctx, wasm)
-	if err != nil {
-		return "", fmt.Errorf("compile wasm: %w", err)
-	}
-
 	go func() {
+		compiled, compErr := r.CompileModule(ctx, wasm)
+		if compErr != nil {
+			done <- result{err: fmt.Errorf("compile wasm: %w", compErr)}
+			return
+		}
 		_, execErr := r.InstantiateModule(ctx, compiled, modCfg)
 		done <- result{err: execErr}
 	}()

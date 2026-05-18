@@ -47,6 +47,7 @@ Sieve.exe
 
 # Wasm parsers (binary, large)
 parsers/*.wasm
+parsers/target
 
 # Embedded model assets (downloaded separately)
 internal/embedding/assets/model.onnx
@@ -62,3 +63,10 @@ Thumbs.db
 .codex
 .continue
 tmp
+
+# Eval harness: generated snapshots and reports (not committed)
+testdata/eval/snapshots/
+testdata/eval/last-report.txt
+
+.claude
+handoff

@@ -21,32 +21,39 @@ func extractSymbolsHeuristic(ext, content string) []Symbol {
 }
 
 // extractPythonSymbols extracts def/class declarations including decorators.
+// It also tracks unqualified function calls inside each def body for Calls edges.
 func extractPythonSymbols(content string) []Symbol {
 	lines := strings.Split(content, "\n")
 	var syms []Symbol
 	var pending []string // accumulated decorator lines
 
+	// first pass: collect symbol definitions and their start lines
+	type defEntry struct {
+		name    string
+		symType string
+		sig     string
+		line    int
+		indent  int
+	}
+	var defs []defEntry
+
 	for i, line := range lines {
 		trimmed := strings.TrimSpace(line)
+		indent := len(line) - len(strings.TrimLeft(line, " \t"))
 
-		// Collect decorators
 		if strings.HasPrefix(trimmed, "@") {
 			pending = append(pending, trimmed)
 			continue
 		}
-
-		// class definition
 		if strings.HasPrefix(trimmed, "class ") || strings.HasPrefix(trimmed, "class(") {
 			name := extractPythonName(trimmed, "class")
 			if name != "" {
 				sig := buildSig(pending, trimmed)
-				syms = append(syms, Symbol{Name: name, Type: "class", Line: i + 1, Content: sig})
+				defs = append(defs, defEntry{name: name, symType: "class", sig: sig, line: i + 1, indent: indent})
 			}
 			pending = nil
 			continue
 		}
-
-		// function / method definition
 		if strings.HasPrefix(trimmed, "def ") || strings.HasPrefix(trimmed, "async def ") {
 			prefix := "def"
 			if strings.HasPrefix(trimmed, "async ") {
@@ -55,19 +62,111 @@ func extractPythonSymbols(content string) []Symbol {
 			name := extractPythonName(trimmed, prefix)
 			if name != "" {
 				sig := buildSig(pending, trimmed)
-				syms = append(syms, Symbol{Name: name, Type: "function", Line: i + 1, Content: sig})
+				defs = append(defs, defEntry{name: name, symType: "function", sig: sig, line: i + 1, indent: indent})
 			}
 			pending = nil
 			continue
 		}
-
-		// Any other non-blank, non-comment line resets decorator accumulation
 		if trimmed != "" && !strings.HasPrefix(trimmed, "#") {
 			pending = nil
 		}
 	}
+
+	// second pass: for each def, collect body lines using indent-based scope.
+	// Using next-def line as boundary was broken for nested classes; indent is authoritative.
+	for _, d := range defs {
+		var bodyLines []string
+		for li := d.line; li < len(lines); li++ {
+			line := lines[li]
+			trimmed := strings.TrimSpace(line)
+			if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+				bodyLines = append(bodyLines, line)
+				continue
+			}
+			lineIndent := len(line) - len(strings.TrimLeft(line, " \t"))
+			if lineIndent <= d.indent {
+				break
+			}
+			bodyLines = append(bodyLines, line)
+		}
+		calls := extractPythonCalls(bodyLines)
+		syms = append(syms, Symbol{
+			Name:    d.name,
+			Type:    d.symType,
+			Line:    d.line,
+			Content: d.sig,
+			Calls:   calls,
+		})
+	}
 	return syms
 }
+
+// extractPythonCalls scans body lines for bare function call names (unqualified).
+func extractPythonCalls(lines []string) []string {
+	seen := map[string]bool{}
+	var calls []string
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		// Skip definition lines — the `name(` pattern would otherwise look like a call.
+		if strings.HasPrefix(trimmed, "def ") || strings.HasPrefix(trimmed, "async def ") ||
+			strings.HasPrefix(trimmed, "class ") {
+			continue
+		}
+		// Find patterns: identifier( at start of expression or after assignment
+		// Simple heuristic: look for word( patterns
+		rest := trimmed
+		for {
+			idx := strings.Index(rest, "(")
+			if idx <= 0 {
+				break
+			}
+			// Extract word before '('
+			word := extractCallName(rest[:idx])
+			rest = rest[idx+1:]
+			if word == "" || strings.Contains(word, ".") {
+				continue // qualified or empty
+			}
+			// Skip keywords
+			if isPythonKeyword(word) {
+				continue
+			}
+			if !seen[word] {
+				seen[word] = true
+				calls = append(calls, word)
+			}
+		}
+	}
+	return calls
+}
+
+func extractCallName(s string) string {
+	s = strings.TrimSpace(s)
+	// Walk backwards from end to find the identifier
+	end := len(s)
+	for i := end - 1; i >= 0; i-- {
+		c := s[i]
+		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' {
+			continue
+		}
+		return strings.TrimSpace(s[i+1 : end])
+	}
+	return strings.TrimSpace(s)
+}
+
+var pythonKeywords = map[string]bool{
+	"if": true, "else": true, "elif": true, "while": true, "for": true,
+	"with": true, "try": true, "except": true, "finally": true,
+	"return": true, "yield": true, "raise": true, "assert": true,
+	"print": true, "super": true, "isinstance": true, "type": true,
+	"len": true, "range": true, "list": true, "dict": true, "set": true,
+	"tuple": true, "str": true, "int": true, "float": true, "bool": true,
+	"open": true, "vars": true, "dir": true, "hasattr": true, "getattr": true,
+}
+
+func isPythonKeyword(s string) bool { return pythonKeywords[s] }
 
 func extractPythonName(line, prefix string) string {
 	rest := strings.TrimSpace(strings.TrimPrefix(line, prefix))

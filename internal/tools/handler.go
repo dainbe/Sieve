@@ -6,12 +6,13 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
-	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"time"
 
 	ctxbuilder "github.com/dainbe/Sieve/internal/context"
+	"github.com/dainbe/Sieve/internal/embed"
 	"github.com/dainbe/Sieve/internal/indexer"
 	"github.com/dainbe/Sieve/internal/sandbox"
 	"github.com/dainbe/Sieve/internal/store"
@@ -27,27 +28,60 @@ type Handler struct {
 	store       *store.Store
 	builder     *ctxbuilder.Builder
 	pm          *indexer.ParserManager
+	idx         *indexer.Indexer // may be nil when auto-index is disabled
 	allowedRoot string
+	parsersDir  string // empty when SIEVE_PARSERS_DIR is not set
 	version     string
 	startedAt   time.Time
+	restartCh   chan struct{}
 }
 
-func NewHandler(s *store.Store, pm *indexer.ParserManager, allowedRoot, version string) *Handler {
+// NewHandler constructs a Handler. An optional restartCh may be supplied so
+// that RestartServer signals the main loop instead of calling os.Exit.
+func NewHandler(s *store.Store, pm *indexer.ParserManager, allowedRoot, parsersDir, version string, restartCh ...chan struct{}) *Handler {
+	var ch chan struct{}
+	if len(restartCh) > 0 {
+		ch = restartCh[0]
+	}
 	return &Handler{
 		store:       s,
 		builder:     ctxbuilder.NewBuilder(s),
 		pm:          pm,
 		allowedRoot: allowedRoot,
+		parsersDir:  parsersDir,
 		version:     version,
 		startedAt:   time.Now(),
+		restartCh:   ch,
 	}
+}
+
+// SetIndexer attaches an Indexer so ctx_status can report live progress.
+func (h *Handler) SetIndexer(ix *indexer.Indexer) {
+	h.idx = ix
+}
+
+// SetEmbedder enables dense semantic retrieval on the builder.
+// Call after BulkEmbed completes (or on startup if vectors already exist).
+func (h *Handler) SetEmbedder(emb *embed.Embedder, idx *embed.VectorIndex) {
+	h.builder.SetEmbedder(emb, idx)
+}
+
+// withinAllowedRoot は path が allowedRoot 配下かを検証する。
+// allowedRoot が空のとき（main.go の必須チェックが通った想定）は常に true。
+func (h *Handler) withinAllowedRoot(path string) bool {
+	if h.allowedRoot == "" {
+		return true
+	}
+	clean := filepath.Clean(path)
+	root := filepath.Clean(h.allowedRoot)
+	return clean == root || strings.HasPrefix(clean, root+string(filepath.Separator))
 }
 
 // --- ctx_build_context ---
 
 func (h *Handler) BuildContext(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	query, ok := req.Params.Arguments["query"].(string)
-	if !ok || query == "" {
+	query := req.GetString("query", "")
+	if query == "" {
 		return mcp.NewToolResultError("query is required"), nil
 	}
 	if len(query) > maxQueryLen {
@@ -76,8 +110,8 @@ func (h *Handler) BuildContext(ctx context.Context, req mcp.CallToolRequest) (*m
 // --- ctx_index_project ---
 
 func (h *Handler) IndexProject(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	path, ok := req.Params.Arguments["path"].(string)
-	if !ok || path == "" {
+	path := req.GetString("path", "")
+	if path == "" {
 		path = h.allowedRoot
 	}
 	if path == "" {
@@ -98,6 +132,10 @@ func (h *Handler) IndexProject(ctx context.Context, req mcp.CallToolRequest) (*m
 		}
 	}
 
+	if !h.withinAllowedRoot(path) {
+		return mcp.NewToolResultError(fmt.Sprintf("path %q is outside the allowed root %q", path, h.allowedRoot)), nil
+	}
+
 	slog.Info("index_project: start", "path", path)
 	count, err := indexer.IndexProject(ctx, h.store, h.pm, h.allowedRoot, path)
 	if err != nil {
@@ -112,8 +150,16 @@ func (h *Handler) IndexProject(ctx context.Context, req mcp.CallToolRequest) (*m
 // --- ctx_reset_index ---
 
 func (h *Handler) ResetIndex(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	path, ok := req.Params.Arguments["path"].(string)
-	if !ok || path == "" {
+	confirm := req.GetString("confirm", "")
+	if confirm != "yes-delete-all" {
+		return mcp.NewToolResultError(`ctx_reset_index requires confirm="yes-delete-all" to prevent accidental data loss`), nil
+	}
+	if h.idx != nil && h.idx.IndexingActive() {
+		return mcp.NewToolResultError("cannot reset index while indexing is in progress; wait for indexing to complete or restart the server"), nil
+	}
+
+	path := req.GetString("path", "")
+	if path == "" {
 		path = h.allowedRoot
 	}
 	if path == "" {
@@ -129,6 +175,10 @@ func (h *Handler) ResetIndex(ctx context.Context, req mcp.CallToolRequest) (*mcp
 			}
 			path = abs
 		}
+	}
+
+	if !h.withinAllowedRoot(path) {
+		return mcp.NewToolResultError(fmt.Sprintf("path %q is outside the allowed root %q", path, h.allowedRoot)), nil
 	}
 
 	slog.Info("reset_index: clearing store")
@@ -151,29 +201,27 @@ func (h *Handler) ResetIndex(ctx context.Context, req mcp.CallToolRequest) (*mcp
 // --- ctx_restart_server ---
 
 func (h *Handler) RestartServer(_ context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	slog.Info("restart_server: exiting process for host-managed restart")
-	// Schedule exit after a brief delay so the MCP response is flushed to the
-	// host before the process terminates. The MCP host (Claude Code / Cursor /
-	// Codex) is responsible for restarting the process.
-	go func() {
-		time.Sleep(200 * time.Millisecond)
-		_ = h.store.Close()
-		os.Exit(0)
-	}()
+	slog.Info("restart_server: signaling main loop to restart")
+	if h.restartCh != nil {
+		select {
+		case h.restartCh <- struct{}{}:
+		default: // channel full, restart already pending
+		}
+	}
 	return mcp.NewToolResultText("Sieve is restarting. Wait a moment then retry your request."), nil
 }
 
 // --- ctx_hybrid_search ---
 
 func (h *Handler) HybridSearch(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	query, ok := req.Params.Arguments["query"].(string)
-	if !ok || query == "" {
+	query := req.GetString("query", "")
+	if query == "" {
 		return mcp.NewToolResultError("query is required"), nil
 	}
 	if len(query) > maxQueryLen {
 		return mcp.NewToolResultError(fmt.Sprintf("query too long (max %d bytes)", maxQueryLen)), nil
 	}
-	limit := argInt(req.Params.Arguments["limit"], 10)
+	limit := req.GetInt("limit", 10)
 	if limit < 1 {
 		limit = 10
 	}
@@ -210,14 +258,14 @@ func (h *Handler) HybridSearch(ctx context.Context, req mcp.CallToolRequest) (*m
 // --- ctx_trace_relation ---
 
 func (h *Handler) TraceRelation(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	symbol, ok := req.Params.Arguments["symbol"].(string)
-	if !ok || symbol == "" {
+	symbol := req.GetString("symbol", "")
+	if symbol == "" {
 		return mcp.NewToolResultError("symbol is required"), nil
 	}
 	if len(symbol) > maxQueryLen {
 		return mcp.NewToolResultError(fmt.Sprintf("symbol too long (max %d bytes)", maxQueryLen)), nil
 	}
-	depth := argInt(req.Params.Arguments["depth"], 2)
+	depth := req.GetInt("depth", 2)
 	if depth < 1 {
 		depth = 2
 	}
@@ -240,14 +288,14 @@ func (h *Handler) TraceRelation(ctx context.Context, req mcp.CallToolRequest) (*
 // --- ctx_quick_exec ---
 
 func (h *Handler) QuickExec(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	wasmB64, ok := req.Params.Arguments["wasm_b64"].(string)
-	if !ok || wasmB64 == "" {
+	wasmB64 := req.GetString("wasm_b64", "")
+	if wasmB64 == "" {
 		return mcp.NewToolResultError("wasm_b64 is required"), nil
 	}
 	if len(wasmB64) > 10*1024*1024 {
 		return mcp.NewToolResultError("wasm_b64 too large (max 10 MB base64)"), nil
 	}
-	stdin, _ := req.Params.Arguments["stdin"].(string)
+	stdin := req.GetString("stdin", "")
 	if len(stdin) > maxStdinSize {
 		return mcp.NewToolResultError(fmt.Sprintf("stdin too large (max %d bytes)", maxStdinSize)), nil
 	}
@@ -263,15 +311,21 @@ func (h *Handler) QuickExec(ctx context.Context, req mcp.CallToolRequest) (*mcp.
 // --- ctx_status ---
 
 type statusResponse struct {
-	Version      string  `json:"version"`
-	Uptime       string  `json:"uptime"`
-	NodeCount    int64   `json:"node_count"`
-	EdgeCount    int64   `json:"edge_count"`
-	GoVersion    string  `json:"go_version"`
-	NumGoroutine int     `json:"goroutines"`
-	MemAllocMB   float64 `json:"mem_alloc_mb"`
-	DBPath       string  `json:"db_path"`
-	AllowedRoot  string  `json:"allowed_root"`
+	Version          string  `json:"version"`
+	Uptime           string  `json:"uptime"`
+	IndexedFiles     int64   `json:"indexed_files"` // alias for node_count for clarity
+	NodeCount        int64   `json:"node_count"`
+	EdgeCount        int64   `json:"edge_count"`
+	GoVersion        string  `json:"go_version"`
+	NumGoroutine     int     `json:"goroutines"`
+	MemAllocMB       float64 `json:"mem_alloc_mb"`
+	DBPath           string  `json:"db_path"`
+	AllowedRoot      string  `json:"allowed_root"`
+	Indexing         bool    `json:"indexing"`
+	IndexingProgress string  `json:"indexing_progress,omitempty"`
+	Embedding        bool    `json:"embedding"`
+	EmbeddedFiles    int32   `json:"embedded_files"`
+	LastIndexError   string  `json:"last_index_error,omitempty"`
 }
 
 func (h *Handler) buildStatusResult() (*mcp.CallToolResult, error) {
@@ -286,6 +340,7 @@ func (h *Handler) buildStatusResult() (*mcp.CallToolResult, error) {
 	resp := statusResponse{
 		Version:      h.version,
 		Uptime:       time.Since(h.startedAt).Round(time.Second).String(),
+		IndexedFiles: nodes,
 		NodeCount:    nodes,
 		EdgeCount:    edges,
 		GoVersion:    runtime.Version(),
@@ -293,6 +348,17 @@ func (h *Handler) buildStatusResult() (*mcp.CallToolResult, error) {
 		MemAllocMB:   math.Round(float64(ms.Alloc)/1024/1024*100) / 100,
 		DBPath:       h.store.Path(),
 		AllowedRoot:  h.allowedRoot,
+	}
+
+	if h.idx != nil {
+		resp.Indexing = h.idx.IndexingActive()
+		done, total := h.idx.IndexingProgress()
+		if total > 0 {
+			resp.IndexingProgress = fmt.Sprintf("%d/%d", done, total)
+		}
+		resp.Embedding = h.idx.EmbeddingActive()
+		resp.EmbeddedFiles = h.idx.EmbeddedFiles()
+		resp.LastIndexError = h.idx.LastIndexError()
 	}
 
 	out, err := marshalJSON(resp)
@@ -317,24 +383,118 @@ func marshalJSON(v any) (string, error) {
 	return string(out), nil
 }
 
-func argInt(v interface{}, defaultVal int) int {
-	if v == nil {
-		return defaultVal
+// --- ctx_init ---
+
+type initResponse struct {
+	Ready          bool     `json:"ready"`
+	IndexedFiles   int64    `json:"indexed_files"`
+	NewlyIndexed   int      `json:"newly_indexed"`
+	Optimized      bool     `json:"optimized"`
+	Indexing       bool     `json:"indexing,omitempty"`
+	IndexProgress  string   `json:"indexing_progress,omitempty"`
+	ParsersFetched []string `json:"parsers_fetched,omitempty"`
+	Message        string   `json:"message"`
+	Warnings       []string `json:"warnings,omitempty"`
+}
+
+func (h *Handler) Init(ctx context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	// If background indexing is in progress, report and ask to retry.
+	if h.idx != nil && h.idx.IndexingActive() {
+		done, total := h.idx.IndexingProgress()
+		prog := ""
+		if total > 0 {
+			prog = fmt.Sprintf("%d/%d", done, total)
+		}
+		resp := initResponse{
+			Ready:         false,
+			Indexing:      true,
+			IndexProgress: prog,
+			Message:       "Indexing is in progress. Call ctx_init again when complete.",
+		}
+		out, err := marshalJSON(resp)
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		return mcp.NewToolResultText(out), nil
 	}
-	switch n := v.(type) {
-	case float64:
-		return int(n)
-	case int:
-		return n
+
+	nodes, _, err := h.store.Stats()
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("stats failed: %v", err)), nil
 	}
-	return defaultVal
+
+	var newlyIndexed int
+	var warnings []string
+	var parsersFetched []string
+
+	// Fetch missing Wasm parsers before indexing so they are used immediately.
+	if h.parsersDir != "" {
+		fetched, fetchErrs := indexer.FetchMissingParsers(ctx, h.parsersDir)
+		parsersFetched = fetched
+		for _, e := range fetchErrs {
+			warnings = append(warnings, "parser-fetch: "+e)
+		}
+	}
+
+	// Build index if empty.
+	if nodes == 0 && h.allowedRoot != "" {
+		slog.Info("init: index empty, indexing now", "root", h.allowedRoot)
+		count, idxErr := indexer.IndexProject(ctx, h.store, h.pm, h.allowedRoot, h.allowedRoot)
+		if idxErr != nil {
+			slog.Warn("init: indexing failed", "err", idxErr)
+			warnings = append(warnings, fmt.Sprintf("indexing: %v", idxErr))
+		} else {
+			newlyIndexed = count
+			slog.Info("init: indexing complete", "indexed", count)
+		}
+		// Refresh node count after indexing.
+		nodes, _, _ = h.store.Stats()
+	}
+
+	// Run SQLite optimization.
+	optimized := false
+	if optErr := h.store.Optimize(); optErr != nil {
+		slog.Warn("init: optimize failed", "err", optErr)
+		warnings = append(warnings, fmt.Sprintf("optimize: %v", optErr))
+	} else {
+		optimized = true
+	}
+
+	msg := "Sieve is ready. Use ctx_build_context to query the codebase."
+	if newlyIndexed > 0 {
+		msg = fmt.Sprintf("Indexed %d files and optimized the database. Use ctx_build_context to query.", newlyIndexed)
+	} else if nodes == 0 {
+		msg = "Index is empty and SIEVE_ALLOWED_ROOT is not set. Call ctx_index_project with an explicit path."
+	}
+
+	resp := initResponse{
+		Ready:          nodes > 0 || newlyIndexed > 0,
+		IndexedFiles:   nodes,
+		NewlyIndexed:   newlyIndexed,
+		Optimized:      optimized,
+		ParsersFetched: parsersFetched,
+		Message:        msg,
+		Warnings:       warnings,
+	}
+
+	slog.Info("init: done",
+		"indexed_files", nodes,
+		"newly_indexed", newlyIndexed,
+		"optimized", optimized,
+	)
+
+	out, err := marshalJSON(resp)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	return mcp.NewToolResultText(out), nil
 }
 
 // --- ctx_drill_down ---
 
 func (h *Handler) DrillDown(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	path, ok := req.Params.Arguments["path"].(string)
-	if !ok || path == "" {
+	path := req.GetString("path", "")
+	if path == "" {
 		return mcp.NewToolResultError("path is required"), nil
 	}
 	if len(path) > 4096 {

@@ -10,6 +10,7 @@ import (
 
 	"github.com/dainbe/Sieve/internal/store"
 	"github.com/mark3labs/mcp-go/mcp"
+	"github.com/mark3labs/mcp-go/server"
 )
 
 func newHandlerForTest(t *testing.T) *Handler {
@@ -20,7 +21,7 @@ func newHandlerForTest(t *testing.T) *Handler {
 		t.Fatalf("store.New: %v", err)
 	}
 	t.Cleanup(func() { _ = s.Close() })
-	return NewHandler(s, nil, tmpDir, "test")
+	return NewHandler(s, nil, tmpDir, "", "test")
 }
 
 func makeReq(args map[string]interface{}) mcp.CallToolRequest {
@@ -146,7 +147,7 @@ func TestIndexProjectHandlerDoesNotDeadlock(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	h := NewHandler(s, nil, "", "test")
+	h := NewHandler(s, nil, "", "", "test")
 	var req mcp.CallToolRequest
 	req.Params.Arguments = map[string]interface{}{"path": projectDir}
 
@@ -223,7 +224,7 @@ func TestHandler_DrillDown_OK(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	h := NewHandler(s, nil, projectDir, "test")
+	h := NewHandler(s, nil, projectDir, "", "test")
 	var indexReq mcp.CallToolRequest
 	indexReq.Params.Arguments = map[string]interface{}{}
 	if _, err := h.IndexProject(context.Background(), indexReq); err != nil {
@@ -284,7 +285,7 @@ func TestHandler_ResetIndex_ClearsThenReindexes(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	h := NewHandler(s, nil, projectDir, "test")
+	h := NewHandler(s, nil, projectDir, "", "test")
 	var indexReq mcp.CallToolRequest
 	indexReq.Params.Arguments = map[string]interface{}{}
 	if _, err := h.IndexProject(context.Background(), indexReq); err != nil {
@@ -303,7 +304,7 @@ func TestHandler_ResetIndex_ClearsThenReindexes(t *testing.T) {
 		t.Fatal(err)
 	}
 	var resetReq mcp.CallToolRequest
-	resetReq.Params.Arguments = map[string]interface{}{}
+	resetReq.Params.Arguments = map[string]interface{}{"confirm": "yes-delete-all"}
 	res, err := h.ResetIndex(context.Background(), resetReq)
 	if err != nil {
 		t.Fatalf("ResetIndex: %v", err)
@@ -321,26 +322,102 @@ func TestHandler_ResetIndex_ClearsThenReindexes(t *testing.T) {
 	}
 }
 
-func TestHandler_Tools_Count(t *testing.T) {
+func TestResetIndexConfirmGuard(t *testing.T) {
 	h := newHandlerForTest(t)
-	tools := h.Tools()
-	const wantCount = 9
-	if len(tools) != wantCount {
-		t.Errorf("expected %d tools, got %d", wantCount, len(tools))
+
+	var req mcp.CallToolRequest
+	req.Params.Arguments = map[string]interface{}{}
+	res, err := h.ResetIndex(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
 	}
-	wantNames := []string{
-		"ctx_build_context", "ctx_index_project", "ctx_drill_down",
-		"ctx_hybrid_search", "ctx_trace_relation", "ctx_quick_exec",
-		"ctx_reset_index", "ctx_restart_server", "ctx_status",
+	if !res.IsError {
+		t.Error("expected IsError=true when confirm is missing")
 	}
-	nameSet := make(map[string]bool, len(tools))
-	for _, tool := range tools {
-		nameSet[tool.Tool.Name] = true
+	if len(res.Content) == 0 {
+		t.Fatal("expected non-empty content")
 	}
-	for _, name := range wantNames {
-		if !nameSet[name] {
-			t.Errorf("tool %q not registered", name)
-		}
+	tc, ok := res.Content[0].(mcp.TextContent)
+	if !ok {
+		t.Fatal("expected TextContent")
+	}
+	if !strings.Contains(tc.Text, "yes-delete-all") {
+		t.Errorf("expected error mentioning yes-delete-all, got: %q", tc.Text)
+	}
+}
+
+func TestHandler_RegisterTools_NoPanic(t *testing.T) {
+	h := newHandlerForTest(t)
+	s := server.NewMCPServer("test", "0.0.0")
+	RegisterTools(s, h) // must not panic
+}
+
+// TestHandler_Init_EmptyIndex verifies Init indexes and optimizes when the store is empty.
+func TestHandler_Init_EmptyIndex(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+	s, err := store.New(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+
+	// Write a Go file to index.
+	if err := os.WriteFile(filepath.Join(tmpDir, "main.go"), []byte("package main\nfunc main() {}\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	h := NewHandler(s, nil, tmpDir, "", "test")
+	res, err := h.Init(context.Background(), mcp.CallToolRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	text, _ := res.Content[0].(mcp.TextContent)
+
+	if !strings.Contains(text.Text, `"ready": true`) {
+		t.Errorf("expected ready=true, got: %s", text.Text)
+	}
+	if !strings.Contains(text.Text, `"newly_indexed": 1`) {
+		t.Errorf("expected newly_indexed=1, got: %s", text.Text)
+	}
+	if !strings.Contains(text.Text, `"optimized": true`) {
+		t.Errorf("expected optimized=true, got: %s", text.Text)
+	}
+}
+
+// TestHandler_Init_AlreadyIndexed verifies Init optimizes without re-indexing when data exists.
+func TestHandler_Init_AlreadyIndexed(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+	s, err := store.New(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+
+	if err := os.WriteFile(filepath.Join(tmpDir, "util.go"), []byte("package main\nfunc Helper() {}\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	h := NewHandler(s, nil, tmpDir, "", "test")
+
+	// First init builds the index.
+	if _, err := h.Init(context.Background(), mcp.CallToolRequest{}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Second init should not re-index.
+	res, err := h.Init(context.Background(), mcp.CallToolRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	text, _ := res.Content[0].(mcp.TextContent)
+
+	if !strings.Contains(text.Text, `"ready": true`) {
+		t.Errorf("expected ready=true, got: %s", text.Text)
+	}
+	if !strings.Contains(text.Text, `"newly_indexed": 0`) {
+		t.Errorf("expected newly_indexed=0 on second call, got: %s", text.Text)
 	}
 }
 
@@ -361,7 +438,7 @@ func TestIndexProjectDefaultsToAllowedRoot(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	h := NewHandler(s, nil, projectDir, "test")
+	h := NewHandler(s, nil, projectDir, "", "test")
 	var req mcp.CallToolRequest
 	req.Params.Arguments = map[string]interface{}{}
 

@@ -1,0 +1,58 @@
+name: Release Parsers
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        lang: [python, typescript, javascript, rust]
+        include:
+          - lang: python
+            crate: sieve-parser-python
+          - lang: typescript
+            crate: sieve-parser-typescript
+          - lang: javascript
+            crate: sieve-parser-javascript
+          - lang: rust
+            crate: sieve-parser-rust
+
+    defaults:
+      run:
+        working-directory: parsers
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust wasm32-wasi target
+        run: rustup target add wasm32-wasip1
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            parsers/target
+          key: parsers-${{ matrix.lang }}-${{ hashFiles('parsers/Cargo.lock') }}
+          restore-keys: parsers-${{ matrix.lang }}-
+
+      - name: Build ${{ matrix.lang }}
+        run: |
+          cargo build \
+            --target wasm32-wasip1 \
+            --release \
+            -p ${{ matrix.crate }}
+
+      - name: Rename artifact
+        run: |
+          cp target/wasm32-wasip1/release/${{ matrix.crate }}.wasm \
+             ${{ matrix.lang }}.wasm
+
+      - name: Upload to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ github.workspace }}/parsers/${{ matrix.lang }}.wasm

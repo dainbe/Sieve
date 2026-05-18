@@ -78,17 +78,20 @@ func TestBuilder_Build_FTSHitOnly(t *testing.T) {
 }
 
 func TestBuilder_Build_GraphExpansion(t *testing.T) {
+	// Disable score threshold so graph-only nodes (low score) are not filtered.
+	t.Setenv("SIEVE_SCORE_THRESHOLD", "0")
 	s := newTestStore(t)
+	// a.go contains the FTS query term; b.go does not — it is reached only via graph.
 	seed(t, s,
 		[]store.Node{
-			{ID: "a.go", Type: "go_file", Content: "package a imports b"},
-			{ID: "b.go", Type: "go_file", Content: "package b unique_token_xyz"},
+			{ID: "a.go", Type: "go_file", Content: "uniquequerytokenABC imports something"},
+			{ID: "b.go", Type: "go_file", Content: "func Helper() {}"},
 		},
 		[][3]string{{"a.go", "b.go", "imports"}},
 	)
 
 	b := ctx.NewBuilder(s)
-	res, err := b.Build("package a")
+	res, err := b.Build("uniquequerytokenABC")
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
@@ -105,14 +108,14 @@ func TestBuilder_Build_GraphExpansion(t *testing.T) {
 }
 
 func TestBuilder_Build_TokenBudget(t *testing.T) {
-	// A "function" node with no newlines passes through compress unchanged.
-	// 9000 chars = 2250 tokens. Two such nodes (4500 total) exceed the default 4000-token
+	// Two go_file nodes each with 9000 chars (2250 tokens) exceed the 4000-token
 	// budget: the first fits (2250), the second triggers Truncated=true.
+	// Content has no newlines so it is one long line → compress returns it unchanged.
 	bigContent := strings.Repeat("budgettoken ", 750) // 9000 chars, no newlines
 	s := newTestStore(t)
 	seed(t, s, []store.Node{
-		{ID: "a.go:FnA", Type: "function", Content: bigContent},
-		{ID: "b.go:FnB", Type: "function", Content: bigContent},
+		{ID: "a.go", Type: "go_file", Content: bigContent},
+		{ID: "b.go", Type: "go_file", Content: bigContent},
 	}, nil)
 
 	b := ctx.NewBuilder(s)
@@ -175,28 +178,33 @@ func TestBuilder_DrillDown_NotFound(t *testing.T) {
 }
 
 func TestBuilder_TypeBoost(t *testing.T) {
-	// typeBoost is tested indirectly: a "function" node should score higher
-	// than an "import" node when both are FTS hits at the same rank.
+	// Graph expansion rolls symbol IDs (e.g. "pkg/a.go:Fn") up to their parent
+	// file ID ("pkg/a.go"). The parent file should appear in results; no separate
+	// symbol candidate is created for contains-edge symbols.
 	s := newTestStore(t)
-	seed(t, s, []store.Node{
-		{ID: "pkg/a.go", Type: "go_file", Content: "boost_term package foo"},
-		{ID: "pkg/a.go:Fn", Type: "function", Content: "boost_term func Fn()"},
-	}, nil)
+	seed(t, s,
+		[]store.Node{
+			{ID: "pkg/a.go", Type: "go_file", Content: "boost_term package foo"},
+			{ID: "pkg/a.go:Fn", Type: "function", Content: "boost_term func Fn()"},
+		},
+		[][3]string{{"pkg/a.go", "pkg/a.go:Fn", "contains"}},
+	)
 
 	b := ctx.NewBuilder(s)
 	res, err := b.Build("boost_term")
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
-	// At least one function node should appear
-	hasFunc := false
+	// The file node must appear; symbol graph hits merge into it rather than creating
+	// a separate entry.
+	hasFile := false
 	for _, n := range res.Nodes {
-		if n.Type == "function" {
-			hasFunc = true
+		if n.ID == "pkg/a.go" {
+			hasFile = true
 		}
 	}
-	if !hasFunc {
-		t.Error("expected function node in results")
+	if !hasFile {
+		t.Error("expected pkg/a.go in results")
 	}
 }
 
@@ -207,4 +215,46 @@ func TestBuilder_ToolCount(t *testing.T) {
 	const expectedTools = 9
 	_ = expectedTools // documented expectation; see internal/tools/registry.go
 	_ = os.Getenv     // suppress unused import warning
+}
+
+func TestBuilder_CompressGoFile_StringLiteralBraces(t *testing.T) {
+	// The old brace-counting heuristic mishandled string literals containing {}.
+	// The AST-based path must not be confused by them.
+	src := `package main
+
+import "fmt"
+
+func greet(name string) {
+	fmt.Printf("Hello, %s! {braces in string}", name)
+}
+
+func add(a, b int) int {
+	return a + b
+}
+`
+	s := newTestStore(t)
+	seed(t, s, []store.Node{
+		{ID: "main.go", Type: "go_file", Content: src},
+	}, nil)
+
+	b := ctx.NewBuilder(s)
+	res, err := b.DrillDown("main.go")
+	if err != nil {
+		t.Fatalf("DrillDown: %v", err)
+	}
+	if len(res.Nodes) == 0 {
+		t.Fatal("expected nodes")
+	}
+	compressed := res.Nodes[0].Content
+	// Both function signatures must appear.
+	if !strings.Contains(compressed, "greet") {
+		t.Errorf("greet signature missing from compressed output:\n%s", compressed)
+	}
+	if !strings.Contains(compressed, "add") {
+		t.Errorf("add signature missing from compressed output:\n%s", compressed)
+	}
+	// The string literal content must not corrupt the output.
+	if strings.Contains(compressed, "braces in string") {
+		t.Errorf("string literal body leaked into compressed output:\n%s", compressed)
+	}
 }
