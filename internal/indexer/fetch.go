@@ -73,8 +73,8 @@ func downloadFile(ctx context.Context, client *http.Client, url, dest string) er
 	}
 
 	if _, err := io.Copy(f, resp.Body); err != nil {
-		f.Close()        //nolint:errcheck
-		os.Remove(tmp)   //nolint:errcheck
+		f.Close()      //nolint:errcheck
+		os.Remove(tmp) //nolint:errcheck
 		return err
 	}
 	if err := f.Close(); err != nil {

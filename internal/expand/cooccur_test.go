@@ -24,32 +24,19 @@ func simpleTokenize(content string) []string {
 }
 
 func TestBuildCooccurrenceBasic(t *testing.T) {
-	// Design: alpha+beta co-occur in 4 out of 6 docs; alpha alone or with gamma in 2.
-	// This makes P(alpha,beta) > P(alpha)*P(beta), producing positive PMI.
-	nodes := []store.Node{
-		{ID: "a.go", Type: "go_file", Content: "alpha beta"},
-		{ID: "b.go", Type: "go_file", Content: "alpha beta"},
-		{ID: "c.go", Type: "go_file", Content: "alpha beta"},
-		{ID: "d.go", Type: "go_file", Content: "alpha beta"},
-		{ID: "e.go", Type: "go_file", Content: "alpha gamma"},
-		{ID: "f.go", Type: "go_file", Content: "alpha gamma"},
-	}
-	// alpha: 6, beta: 4, gamma: 2.
-	// alpha-beta cooc=4; PMI = log(4*6/(6*4)) = log(1) = 0 — still 0!
-	// We need an asymmetric setup. Use 10 docs: beta appears in 5, alpha in 8,
-	// alpha-beta cooc=5. PMI = log(5*10/(8*5)) = log(10/8) = log(1.25) > 0.
-	nodes = nil
-	for i := 0; i < 8; i++ {
-		nodes = append(nodes, store.Node{ID: "a" + string(rune('0'+i)) + ".go", Type: "go_file", Content: "alpha delta"})
-	}
-	for i := 0; i < 5; i++ {
-		nodes = append(nodes, store.Node{ID: "b" + string(rune('0'+i)) + ".go", Type: "go_file", Content: "alpha beta"})
-	}
-	// Now: alpha=13, delta=8, beta=5. alpha-delta cooc=8, alpha-beta cooc=5.
-	// PMI(alpha,delta) = log(8*13/(13*8)) = 0 again... all nodes have alpha.
-	// Better: completely separate clusters.
-	nodes = nil
+	// Design Thoughts:
+	// - Try 1: alpha+beta co-occur in 4 out of 6 docs; alpha alone or with gamma in 2.
+	//   This makes P(alpha,beta) > P(alpha)*P(beta), producing positive PMI.
+	//   alpha: 6, beta: 4, gamma: 2. alpha-beta cooc=4; PMI = log(4*6/(6*4)) = log(1) = 0 — still 0!
+	// - Try 2: We need an asymmetric setup. Use 10 docs: beta appears in 5, alpha in 8,
+	//   alpha-beta cooc=5. PMI = log(5*10/(8*5)) = log(10/8) = log(1.25) > 0.
+	//   Now: alpha=13, delta=8, beta=5. alpha-delta cooc=8, alpha-beta cooc=5.
+	//   PMI(alpha,delta) = log(8*13/(13*8)) = 0 again... all nodes have alpha.
+	//
+	// Final Design: completely separate clusters.
 	// 5 docs: alpha+beta only; 3 docs: gamma+delta only; 2 docs: alpha+gamma (bridge).
+	var nodes []store.Node
+
 	for i := 0; i < 5; i++ {
 		nodes = append(nodes, store.Node{ID: "ab" + string(rune('0'+i)) + ".go", Type: "go_file", Content: "alpha beta"})
 	}
@@ -59,6 +46,7 @@ func TestBuildCooccurrenceBasic(t *testing.T) {
 	for i := 0; i < 2; i++ {
 		nodes = append(nodes, store.Node{ID: "ag" + string(rune('0'+i)) + ".go", Type: "go_file", Content: "alpha gamma"})
 	}
+
 	// N=10; alpha=7, beta=5, gamma=5, delta=3.
 	// alpha-beta cooc=5; PMI = log(5*10/(7*5)) = log(10/7) ≈ 0.36 > 0 ✓
 	// gamma-delta cooc=3; PMI = log(3*10/(5*3)) = log(2) ≈ 0.69 > 0 ✓

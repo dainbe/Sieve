@@ -96,4 +96,3 @@ func l2normalize(v []float32) []float32 {
 	}
 	return out
 }
-

@@ -40,7 +40,7 @@ type parsedFile struct {
 	relPath  string
 	hash     string
 	nodeType string
-	content  string   // augmented content for FTS
+	content  string // augmented content for FTS
 	imports  []string
 	symbols  []Symbol
 }

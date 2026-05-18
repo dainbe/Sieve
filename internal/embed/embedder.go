@@ -59,7 +59,7 @@ func NewWithModel(ctx context.Context, modelName, cacheDir string) (*Embedder, e
 	if _, statErr := os.Stat(filepath.Join(modelPath, "model.onnx")); os.IsNotExist(statErr) {
 		downloaded, dlErr := hugot.DownloadModel(ctx, modelName, cacheDir, hugot.NewDownloadOptions())
 		if dlErr != nil {
-			session.Destroy()
+			_ = session.Destroy()
 			return nil, fmt.Errorf("embed: download model %s: %w", modelName, dlErr)
 		}
 		modelPath = downloaded
@@ -71,7 +71,7 @@ func NewWithModel(ctx context.Context, modelName, cacheDir string) (*Embedder, e
 	}
 	pipeline, err := hugot.NewPipeline(session, config)
 	if err != nil {
-		session.Destroy()
+		_ = session.Destroy()
 		return nil, fmt.Errorf("embed: create pipeline: %w", err)
 	}
 
@@ -106,6 +106,6 @@ func (e *Embedder) EmbedOne(ctx context.Context, text string) ([]float32, error)
 // Close releases the underlying hugot session.
 func (e *Embedder) Close() {
 	if e.session != nil {
-		e.session.Destroy()
+		_ = e.session.Destroy()
 	}
 }

@@ -735,4 +735,3 @@ func SummaryLine(n store.Node) string {
 		return fmt.Sprintf("[%s] %s (%d lines)", strings.TrimSuffix(n.Type, "_file")+ext, n.ID, lineCount)
 	}
 }
-

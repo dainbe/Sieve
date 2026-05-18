@@ -31,7 +31,6 @@ const (
 	pruneEvery = 500
 )
 
-
 // BuildPPMI computes PPMI co-occurrence neighbors for every term in the corpus
 // and writes the results to the term_neighbors table in s.
 //
@@ -182,7 +181,7 @@ func BuildPPMI(s *store.Store, tokenize func(string) []string, topK, changedFile
 	}
 
 	// B.3: release the co-occurrence map before writing to DB so the GC can reclaim it.
-	cooc = nil
+	cooc = nil //nolint:ineffassign
 	runtime.GC()
 
 	slog.Debug("expand: PPMI build complete", "pairs", len(result))
