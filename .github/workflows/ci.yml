@@ -32,5 +32,5 @@ jobs:
           cache: false # 確実に古いキャッシュを避けるため、一度 false に設定
       - name: Run golangci-lint
         run: |
-          CGO_ENABLED=0 go install -a github.com/golangci/golangci-lint/cmd/golangci-lint@latest
+          CGO_ENABLED=0 go install -a github.com/golangci/golangci-lint/cmd/golangci-lint@master
           $(go env GOPATH)/bin/golangci-lint run --timeout 5m
