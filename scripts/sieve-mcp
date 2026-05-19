@@ -1,0 +1,8 @@
+#!/bin/sh
+# sieve-mcp — wrapper for running Sieve as an MCP server.
+# SIEVE_ALLOWED_ROOT defaults to the working directory when Claude Code
+# spawns this process (i.e. the project root), so a single global
+# registration works across all projects.
+SIEVE_ALLOWED_ROOT="${SIEVE_ALLOWED_ROOT:-$PWD}"
+export SIEVE_ALLOWED_ROOT
+exec "$(dirname "$0")/../sieve" "$@"

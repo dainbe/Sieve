@@ -108,6 +108,30 @@ func (s *Store) Optimize() error {
 	return nil
 }
 
+// GetMeta returns the value for key from the meta table.
+// Returns ("", nil) when the key does not exist.
+func (s *Store) GetMeta(key string) (string, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var value string
+	err := s.db.QueryRow(`SELECT value FROM meta WHERE key = ?`, key).Scan(&value)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	return value, err
+}
+
+// SetMeta upserts key/value in the meta table.
+func (s *Store) SetMeta(key, value string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, err := s.db.Exec(
+		`INSERT INTO meta(key, value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`,
+		key, value,
+	)
+	return err
+}
+
 func (s *Store) Stats() (nodeCount, edgeCount int64, err error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()

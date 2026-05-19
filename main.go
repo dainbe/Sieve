@@ -12,6 +12,7 @@ import (
 	"syscall"
 
 	"github.com/dainbe/Sieve/internal/embed"
+	"github.com/dainbe/Sieve/internal/gitstate"
 	"github.com/dainbe/Sieve/internal/indexer"
 	"github.com/dainbe/Sieve/internal/store"
 	"github.com/dainbe/Sieve/internal/tools"
@@ -49,6 +50,7 @@ var envVars = []envVar{
 	{"SIEVE_PPMI_DISABLE", "0", "Set to 1 to disable PPMI entirely.", false},
 	{"SIEVE_PPMI_REBUILD_THRESHOLD", "100", "Skip PPMI rebuild if fewer than N files changed.", false},
 	{"SIEVE_PARSERS_DIR", "", "Directory containing Wasm parser binaries.", false},
+	{"SIEVE_HEAD_WATCH", "1", "Set to 0 to disable automatic re-index on git branch switch.", false},
 	{"SIEVE_DEBUG", "0", "Set to 1 to enable debug-level logging.", false},
 	{"SIEVE_EVAL_DUMP", "0", "Set to 1 to dump eval context output.", false},
 }
@@ -208,6 +210,15 @@ func run() error {
 		if vecs, vErr := db.LoadAllVectors(); vErr == nil && len(vecs) > 0 {
 			h.SetEmbedder(embImpl, embed.NewVectorIndex(vecs))
 			slog.Info("dense retrieval: loaded existing vectors", "count", len(vecs))
+		}
+	}
+
+	// --- Seed last_indexed_head so head_watch has a baseline on first run ---
+	// IndexAll writes this on completion; seed here in case auto-index is
+	// disabled or the server is restarted without re-indexing.
+	if head, hErr := gitstate.ReadHead(allowedRoot); hErr == nil && head != "" {
+		if existing, _ := db.GetMeta("last_indexed_head"); existing == "" {
+			_ = db.SetMeta("last_indexed_head", head)
 		}
 	}
 

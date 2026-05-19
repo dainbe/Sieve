@@ -7,7 +7,7 @@ import (
 
 // currentVersion is the schema version this binary expects.
 // Bump this and add a migration function when the schema changes.
-const currentVersion = 4
+const currentVersion = 5
 
 // migrations is an ordered list of upgrade functions.
 // migrations[i] upgrades from version i to version i+1.
@@ -17,6 +17,7 @@ var migrations = []func(*sql.Tx) error{
 	migrateV1toV2,
 	migrateV2toV3,
 	migrateV3toV4,
+	migrateV4toV5,
 }
 
 // migrate reads PRAGMA user_version and applies any pending migrations in
@@ -94,6 +95,17 @@ CREATE TABLE IF NOT EXISTS vectors (
     node_id TEXT PRIMARY KEY,
     dim     INTEGER NOT NULL,
     vec     BLOB NOT NULL
+)`)
+	return err
+}
+
+// migrateV4toV5 adds the meta table for storing server-side key/value state
+// (e.g. last_indexed_head for automatic re-indexing on branch switch).
+func migrateV4toV5(tx *sql.Tx) error {
+	_, err := tx.Exec(`
+CREATE TABLE IF NOT EXISTS meta (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
 )`)
 	return err
 }

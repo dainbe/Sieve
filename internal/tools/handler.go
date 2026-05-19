@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -13,6 +14,7 @@ import (
 
 	ctxbuilder "github.com/dainbe/Sieve/internal/context"
 	"github.com/dainbe/Sieve/internal/embed"
+	"github.com/dainbe/Sieve/internal/gitstate"
 	"github.com/dainbe/Sieve/internal/indexer"
 	"github.com/dainbe/Sieve/internal/sandbox"
 	"github.com/dainbe/Sieve/internal/store"
@@ -66,6 +68,32 @@ func (h *Handler) SetEmbedder(emb *embed.Embedder, idx *embed.VectorIndex) {
 	h.builder.SetEmbedder(emb, idx)
 }
 
+// maybeReindexOnHeadChange checks whether the git HEAD in allowedRoot has
+// changed since the last completed index run. If so, and SIEVE_HEAD_WATCH is
+// not "0", it kicks off an asynchronous incremental re-index.
+// This is a fast path: the HEAD file read is sub-millisecond.
+func (h *Handler) maybeReindexOnHeadChange(ctx context.Context) {
+	if h.idx == nil || h.allowedRoot == "" {
+		return
+	}
+	if os.Getenv("SIEVE_HEAD_WATCH") == "0" {
+		return
+	}
+	current, err := gitstate.ReadHead(h.allowedRoot)
+	if err != nil || current == "" {
+		return
+	}
+	last, err := h.store.GetMeta("last_indexed_head")
+	if err != nil || current == last {
+		return
+	}
+	if h.idx.IndexingActive() {
+		return
+	}
+	slog.Info("head_watch: HEAD changed, kicking re-index", "from", last, "to", current)
+	go h.idx.IndexAll(ctx)
+}
+
 // withinAllowedRoot は path が allowedRoot 配下かを検証する。
 // allowedRoot が空のとき（main.go の必須チェックが通った想定）は常に true。
 func (h *Handler) withinAllowedRoot(path string) bool {
@@ -80,6 +108,7 @@ func (h *Handler) withinAllowedRoot(path string) bool {
 // --- ctx_build_context ---
 
 func (h *Handler) BuildContext(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	h.maybeReindexOnHeadChange(ctx)
 	query := req.GetString("query", "")
 	if query == "" {
 		return mcp.NewToolResultError("query is required"), nil
@@ -214,6 +243,7 @@ func (h *Handler) RestartServer(_ context.Context, _ mcp.CallToolRequest) (*mcp.
 // --- ctx_hybrid_search ---
 
 func (h *Handler) HybridSearch(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	h.maybeReindexOnHeadChange(ctx)
 	query := req.GetString("query", "")
 	if query == "" {
 		return mcp.NewToolResultError("query is required"), nil
@@ -258,6 +288,7 @@ func (h *Handler) HybridSearch(ctx context.Context, req mcp.CallToolRequest) (*m
 // --- ctx_trace_relation ---
 
 func (h *Handler) TraceRelation(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	h.maybeReindexOnHeadChange(ctx)
 	symbol := req.GetString("symbol", "")
 	if symbol == "" {
 		return mcp.NewToolResultError("symbol is required"), nil
@@ -398,6 +429,7 @@ type initResponse struct {
 }
 
 func (h *Handler) Init(ctx context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	h.maybeReindexOnHeadChange(ctx)
 	// If background indexing is in progress, report and ask to retry.
 	if h.idx != nil && h.idx.IndexingActive() {
 		done, total := h.idx.IndexingProgress()
@@ -493,6 +525,7 @@ func (h *Handler) Init(ctx context.Context, _ mcp.CallToolRequest) (*mcp.CallToo
 // --- ctx_drill_down ---
 
 func (h *Handler) DrillDown(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	h.maybeReindexOnHeadChange(ctx)
 	path := req.GetString("path", "")
 	if path == "" {
 		return mcp.NewToolResultError("path is required"), nil

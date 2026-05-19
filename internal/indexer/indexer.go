@@ -19,6 +19,7 @@ import (
 
 	"github.com/dainbe/Sieve/internal/env"
 	"github.com/dainbe/Sieve/internal/expand"
+	"github.com/dainbe/Sieve/internal/gitstate"
 	"github.com/dainbe/Sieve/internal/store"
 )
 
@@ -103,8 +104,11 @@ func (ix *Indexer) LastIndexError() string {
 }
 
 // IndexAll indexes allowedRoot in the background. Callers should run this in a goroutine.
+// A second concurrent call is a no-op (guarded by CAS on indexingActive).
 func (ix *Indexer) IndexAll(ctx context.Context) {
-	atomic.StoreInt32(&ix.indexingActive, 1)
+	if !atomic.CompareAndSwapInt32(&ix.indexingActive, 0, 1) {
+		return
+	}
 	atomic.StoreInt32(&ix.indexingDone, 0)
 	atomic.StoreInt32(&ix.indexingTotal, 0)
 	defer atomic.StoreInt32(&ix.indexingActive, 0)
@@ -128,6 +132,14 @@ func (ix *Indexer) IndexAll(ctx context.Context) {
 	}
 	atomic.AddInt32(&ix.indexingDone, int32(n))
 	slog.Info("auto-index: complete", "root", ix.allowedRoot, "updated", n)
+
+	// Record the git HEAD at the time of successful indexing so that
+	// maybeReindexOnHeadChange can detect branch switches.
+	if head, hErr := gitstate.ReadHead(ix.allowedRoot); hErr == nil && head != "" {
+		if sErr := ix.st.SetMeta("last_indexed_head", head); sErr != nil {
+			slog.Warn("auto-index: failed to persist last_indexed_head", "err", sErr)
+		}
+	}
 }
 
 // BulkEmbed embeds all file nodes that do not yet have a vector stored.
