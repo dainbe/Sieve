@@ -27,8 +27,28 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust wasm32-wasi target
+      - name: Install Rust wasm32-wasip1 target
         run: rustup target add wasm32-wasip1
+
+      - name: Cache WASI-SDK
+        id: cache-wasi
+        uses: actions/cache@v4
+        with:
+          path: parsers/wasi-sdk-24.0-x86_64-linux
+          key: wasi-sdk-24.0
+
+      - name: Download WASI-SDK
+        if: steps.cache-wasi.outputs.cache-hit != 'true'
+        run: |
+          wget -q https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-24/wasi-sdk-24.0-x86_64-linux.tar.gz
+          tar xf wasi-sdk-24.0-x86_64-linux.tar.gz
+
+      - name: Set WASI-SDK Environment Variables
+        run: |
+          WASI_SDK_PATH="${{ github.workspace }}/parsers/wasi-sdk-24.0-x86_64-linux"
+          echo "CC_wasm32_wasip1=${WASI_SDK_PATH}/bin/clang" >> $GITHUB_ENV
+          echo "CFLAGS_wasm32_wasip1=--sysroot=${WASI_SDK_PATH}/share/wasi-sysroot -Wno-implicit-function-declaration" >> $GITHUB_ENV
+          echo "CARGO_TARGET_WASM32_WASIP1_RUSTFLAGS=-C link-arg=--allow-undefined" >> $GITHUB_ENV
 
       - name: Cache Cargo
         uses: actions/cache@v4

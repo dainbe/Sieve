@@ -47,20 +47,21 @@ build-parsers:
 	docker run --rm \
 		-v "$(CURDIR)/parsers:/work" \
 		-w /work \
-		rust:latest \
-		bash -c "apt-get update -qq && apt-get install -y -qq wget xz-utils && \
-		         ARCH=\$$(uname -m | sed 's/aarch64/arm64/'); \
-		         wget -q -P /tmp https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-24/wasi-sdk-24.0-\$$ARCH-linux.tar.gz && \
-		         tar xf /tmp/wasi-sdk-24.0-\$$ARCH-linux.tar.gz -C /opt && \
-		         export WASI_SDK=/opt/wasi-sdk-24.0-\$$ARCH-linux && \
-		         export CC_wasm32_wasip1=\$$WASI_SDK/bin/clang && \
-		         export CFLAGS_wasm32_wasip1=\"--sysroot=\$$WASI_SDK/share/wasi-sysroot -Wno-implicit-function-declaration\" && \
-		         export CARGO_TARGET_WASM32_WASIP1_RUSTFLAGS=\"-C link-arg=--allow-undefined -C link-arg=--allow-multiple-definition\" && \
-		         rustup target add wasm32-wasip1 && \
-		         cargo build --target wasm32-wasip1 --release && \
-		         for lang in python typescript javascript rust; do \
-		           cp target/wasm32-wasip1/release/sieve_parser_\$$lang.wasm \$$lang.wasm; \
-		         done"
+		rust:1.85-slim \
+		bash -e -c "\
+apt-get update -qq && apt-get install -y -qq --no-install-recommends wget xz-utils ca-certificates && \
+ARCH=\$$(uname -m | sed 's/aarch64/arm64/'); \
+wget -q -P /tmp https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-24/wasi-sdk-24.0-\$$ARCH-linux.tar.gz && \
+tar xf /tmp/wasi-sdk-24.0-\$$ARCH-linux.tar.gz -C /opt && \
+export WASI_SDK=/opt/wasi-sdk-24.0-\$$ARCH-linux && \
+export CC_wasm32_wasip1=\$$WASI_SDK/bin/clang && \
+export CFLAGS_wasm32_wasip1=\"--sysroot=\$$WASI_SDK/share/wasi-sysroot -Wno-implicit-function-declaration\" && \
+export CARGO_TARGET_WASM32_WASIP1_RUSTFLAGS=\"-C link-arg=--allow-undefined\" && \
+rustup target add wasm32-wasip1 && \
+cargo build --target wasm32-wasip1 --release && \
+for lang in python typescript javascript rust; do \
+  cp target/wasm32-wasip1/release/sieve_parser_\$$lang.wasm \$$lang.wasm; \
+done"
 
 # Run the precision/recall evaluation harness.
 # Usage: make eval [EVAL_DIR=./testdata/eval]

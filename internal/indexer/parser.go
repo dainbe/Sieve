@@ -66,8 +66,8 @@ func (pm *ParserManager) Parse(ctx context.Context, lang, code string) (string, 
 	}
 	defer mod.Close(ctx) //nolint:errcheck
 
-	malloc := mod.ExportedFunction("malloc")
-	free := mod.ExportedFunction("free")
+	malloc := mod.ExportedFunction("sieve_malloc")
+	free := mod.ExportedFunction("sieve_free")
 	parse := mod.ExportedFunction("parse")
 	if malloc == nil || free == nil || parse == nil {
 		return "", fmt.Errorf("parser %s missing required exports (malloc/free/parse)", lang)

@@ -12,14 +12,14 @@ struct Symbol {
 }
 
 #[no_mangle]
-pub extern "C" fn malloc(size: u32) -> *mut u8 {
+pub extern "C" fn sieve_malloc(size: u32) -> *mut u8 {
     if size == 0 { return std::ptr::null_mut(); }
     let layout = Layout::from_size_align(size as usize, 1).unwrap();
     unsafe { alloc(layout) }
 }
 
 #[no_mangle]
-pub extern "C" fn free(ptr: *mut u8) {
+pub extern "C" fn sieve_free(ptr: *mut u8) {
     if ptr.is_null() { return; }
     let layout = Layout::from_size_align(1, 1).unwrap();
     unsafe { dealloc(ptr, layout) }
